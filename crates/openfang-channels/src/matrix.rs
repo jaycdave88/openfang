@@ -350,6 +350,7 @@ impl ChannelAdapter for MatrixAdapter {
 
                                 // FIX #2: Detect @mentions in message text.
                                 let mut metadata = HashMap::new();
+                                metadata.insert("sender_user_id".to_string(), serde_json::json!(sender));
                                 if content.contains(&user_id) {
                                     metadata.insert(
                                         "was_mentioned".to_string(),
