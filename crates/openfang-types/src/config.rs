@@ -1867,6 +1867,17 @@ pub struct MatrixConfig {
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// Optional appservice AS token env var for sending messages via the
+    /// appservice API. When set, outgoing messages use this token with
+    /// `?user_id=<appservice_user_id>` so Conduit pushes them to the
+    /// appservice transaction stream (needed for bridges like mautrix-imessage).
+    #[serde(default)]
+    pub appservice_token_env: Option<String>,
+    /// The Matrix user ID to impersonate when sending via the appservice API
+    /// (e.g., `"@imessagebot:momo.local"`). Required when `appservice_token_env`
+    /// is set.
+    #[serde(default)]
+    pub appservice_user_id: Option<String>,
 }
 
 impl Default for MatrixConfig {
@@ -1879,6 +1890,8 @@ impl Default for MatrixConfig {
             default_agent: None,
             auto_accept_invites: false,
             overrides: ChannelOverrides::default(),
+            appservice_token_env: None,
+            appservice_user_id: None,
         }
     }
 }

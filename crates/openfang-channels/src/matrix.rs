@@ -37,6 +37,12 @@ pub struct MatrixAdapter {
     since_token: Arc<RwLock<Option<String>>>,
     /// Whether to auto-accept room invites.
     auto_accept_invites: bool,
+    /// Optional appservice AS token for sending messages. When set, outgoing
+    /// messages use this token with `?user_id=` so Conduit pushes them to the
+    /// appservice transaction stream (needed for bridges like mautrix-imessage).
+    appservice_token: Option<Zeroizing<String>>,
+    /// The Matrix user ID to impersonate when sending via the appservice API.
+    appservice_user_id: Option<String>,
 }
 
 impl MatrixAdapter {
@@ -59,6 +65,32 @@ impl MatrixAdapter {
             shutdown_rx,
             since_token: Arc::new(RwLock::new(None)),
             auto_accept_invites,
+            appservice_token: None,
+            appservice_user_id: None,
+        }
+    }
+
+    /// Configure appservice mode for sending messages. When set, outgoing
+    /// messages use the AS token with `?user_id=` impersonation so the
+    /// homeserver pushes events to the appservice transaction stream.
+    pub fn with_appservice(mut self, token: String, user_id: String) -> Self {
+        info!(
+            "Matrix adapter: appservice send mode enabled, sending as {user_id}"
+        );
+        self.appservice_token = Some(Zeroizing::new(token));
+        self.appservice_user_id = Some(user_id);
+        self
+    }
+
+    /// Get the token and optional `?user_id=` query suffix for sending.
+    /// Returns (token, url_suffix).
+    fn send_auth(&self) -> (&str, String) {
+        if let (Some(ref as_token), Some(ref as_user)) =
+            (&self.appservice_token, &self.appservice_user_id)
+        {
+            (as_token.as_str(), format!("?user_id={as_user}"))
+        } else {
+            (self.access_token.as_str(), String::new())
         }
     }
 
@@ -68,14 +100,16 @@ impl MatrixAdapter {
         room_id: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let txn_id = uuid::Uuid::new_v4().to_string();
-        let url = format!(
-            "{}/_matrix/client/v3/rooms/{}/send/m.room.message/{}",
-            self.homeserver_url, room_id, txn_id
-        );
+        let (token, qs) = self.send_auth();
 
         let chunks = crate::types::split_message(text, MAX_MESSAGE_LEN);
         for chunk in chunks {
+            let txn_id = uuid::Uuid::new_v4().to_string();
+            let url = format!(
+                "{}/_matrix/client/v3/rooms/{}/send/m.room.message/{}{}",
+                self.homeserver_url, room_id, txn_id, qs
+            );
+
             let body = serde_json::json!({
                 "msgtype": "m.text",
                 "body": chunk,
@@ -84,7 +118,7 @@ impl MatrixAdapter {
             let resp = self
                 .client
                 .put(&url)
-                .bearer_auth(&*self.access_token)
+                .bearer_auth(token)
                 .json(&body)
                 .send()
                 .await?;
@@ -425,9 +459,14 @@ impl ChannelAdapter for MatrixAdapter {
     }
 
     async fn send_typing(&self, user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+        let (token, qs) = self.send_auth();
+        let typing_user = self
+            .appservice_user_id
+            .as_deref()
+            .unwrap_or(&self.user_id);
         let url = format!(
-            "{}/_matrix/client/v3/rooms/{}/typing/{}",
-            self.homeserver_url, user.platform_id, self.user_id
+            "{}/_matrix/client/v3/rooms/{}/typing/{}{}",
+            self.homeserver_url, user.platform_id, typing_user, qs
         );
 
         let body = serde_json::json!({
@@ -438,7 +477,7 @@ impl ChannelAdapter for MatrixAdapter {
         let _ = self
             .client
             .put(&url)
-            .bearer_auth(&*self.access_token)
+            .bearer_auth(token)
             .json(&body)
             .send()
             .await;
@@ -488,5 +527,29 @@ mod tests {
             false,
         );
         assert!(open.is_allowed_room("!any:matrix.org"));
+    }
+
+    #[test]
+    fn test_matrix_appservice_send_auth() {
+        let adapter = MatrixAdapter::new(
+            "https://matrix.org".to_string(),
+            "@bot:matrix.org".to_string(),
+            "user_token".to_string(),
+            vec![],
+            false,
+        );
+        // Without appservice: uses user token, no query suffix
+        let (token, qs) = adapter.send_auth();
+        assert_eq!(token, "user_token");
+        assert!(qs.is_empty());
+
+        // With appservice: uses AS token + ?user_id=
+        let adapter = adapter.with_appservice(
+            "as_token_123".to_string(),
+            "@bridge:matrix.org".to_string(),
+        );
+        let (token, qs) = adapter.send_auth();
+        assert_eq!(token, "as_token_123");
+        assert_eq!(qs, "?user_id=@bridge:matrix.org");
     }
 }

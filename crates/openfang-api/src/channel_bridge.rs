@@ -1214,14 +1214,32 @@ pub async fn start_channel_bridge_with_config(
     // Matrix
     if let Some(ref mx_config) = config.matrix {
         if let Some(token) = read_token(&mx_config.access_token_env, "Matrix") {
-            let adapter = Arc::new(MatrixAdapter::new(
+            let mut adapter = MatrixAdapter::new(
                 mx_config.homeserver_url.clone(),
                 mx_config.user_id.clone(),
                 token,
                 mx_config.allowed_rooms.clone(),
                 mx_config.auto_accept_invites,
-            ));
-            adapters.push((adapter, mx_config.default_agent.clone()));
+            );
+
+            // If appservice token is configured, enable appservice send mode.
+            // This makes outgoing messages use the AS token with ?user_id=
+            // so the homeserver pushes them to the appservice transaction
+            // stream (needed for bridges like mautrix-imessage).
+            if let Some(ref as_env) = mx_config.appservice_token_env {
+                if let Some(as_token) = read_token(as_env, "Matrix appservice") {
+                    if let Some(ref as_user) = mx_config.appservice_user_id {
+                        adapter = adapter.with_appservice(as_token, as_user.clone());
+                    } else {
+                        warn!(
+                            "Matrix appservice_token_env is set but appservice_user_id is missing, \
+                             skipping appservice send mode"
+                        );
+                    }
+                }
+            }
+
+            adapters.push((Arc::new(adapter), mx_config.default_agent.clone()));
         }
     }
 
