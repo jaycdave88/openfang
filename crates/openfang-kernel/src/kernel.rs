@@ -1089,7 +1089,9 @@ impl OpenFangKernel {
                                             || disk_manifest.tool_allowlist
                                                 != entry.manifest.tool_allowlist
                                             || disk_manifest.tool_blocklist
-                                                != entry.manifest.tool_blocklist;
+                                                != entry.manifest.tool_blocklist
+                                            || disk_manifest.routing
+                                                != entry.manifest.routing;
                                         if changed {
                                             info!(
                                                 agent = %name,
@@ -2458,11 +2460,17 @@ impl OpenFangKernel {
                 system: Some(manifest.model.system_prompt.clone()),
                 thinking: None,
             };
+            let raw_score = router.raw_score(&probe);
             let (complexity, routed_model) = router.select_model(&probe);
             info!(
                 agent = %manifest.name,
                 complexity = %complexity,
                 routed_model = %routed_model,
+                raw_score = raw_score,
+                system_prompt_len = manifest.model.system_prompt.len(),
+                tool_count = tools.len(),
+                simple_threshold = routing_config.simple_threshold,
+                complex_threshold = routing_config.complex_threshold,
                 "Model routing applied"
             );
             manifest.model.model = routed_model.clone();

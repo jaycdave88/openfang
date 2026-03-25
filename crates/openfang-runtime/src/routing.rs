@@ -130,6 +130,45 @@ impl ModelRouter {
         (complexity, model)
     }
 
+    /// Return the raw numeric score for a request (for debugging/logging).
+    pub fn raw_score(&self, request: &CompletionRequest) -> u32 {
+        let mut score: u32 = 0;
+        let total_chars: usize = request
+            .messages
+            .iter()
+            .map(|m| m.content.text_length())
+            .sum();
+        score += (total_chars / 4) as u32;
+        let tool_count = request.tools.len() as u32;
+        if tool_count > 0 {
+            score += tool_count * 20;
+        }
+        if let Some(last_msg) = request.messages.last() {
+            let text = last_msg.content.text_content();
+            let text_lower = text.to_lowercase();
+            let code_markers = [
+                "```", "fn ", "def ", "class ", "import ", "function ", "async ", "await ",
+                "struct ", "impl ", "return ",
+            ];
+            score += code_markers
+                .iter()
+                .filter(|marker| text_lower.contains(*marker))
+                .count() as u32
+                * 30;
+        }
+        let msg_count = request.messages.len() as u32;
+        if msg_count > 10 {
+            score += (msg_count - 10) * 15;
+        }
+        if let Some(ref system) = request.system {
+            let sys_len = system.len() as u32;
+            if sys_len > 500 {
+                score += (sys_len - 500) / 10;
+            }
+        }
+        score
+    }
+
     /// Validate that all configured models exist in the catalog.
     ///
     /// Returns a list of warning messages for models not found in the catalog.
