@@ -3,9 +3,19 @@
 //! The router scores each `CompletionRequest` based on heuristics (token count,
 //! tool availability, code markers, conversation depth) and picks the cheapest
 //! model that can handle the task.
+//!
+//! ## Two-stage dynamic tool selection
+//!
+//! When `dynamic_tool_selection` is enabled in the routing config, a fast
+//! classification model (Stage 1) categorises the user message into tool
+//! categories *before* the main LLM call. Only tools matching the selected
+//! categories are forwarded (Stage 2), dramatically reducing system-prompt size.
 
 use crate::llm_driver::CompletionRequest;
 use openfang_types::agent::ModelRoutingConfig;
+use openfang_types::tool::ToolDefinition;
+use std::collections::HashMap;
+use tracing::warn;
 
 /// Task complexity tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +212,133 @@ impl ModelRouter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Two-stage dynamic tool selection
+// ---------------------------------------------------------------------------
+
+/// Classification prompt used by the tool selector (Stage 1).
+pub const TOOL_SELECTOR_SYSTEM_PROMPT: &str = "\
+You are a message classifier. Given the user message, return a JSON array of relevant tool \
+categories from: [greeting, os_control, research, trading, scheduling, coding, browser, media, \
+agent_management, general]. If no tools are needed, return []. Only return the JSON array, nothing else.";
+
+/// All known category names (used for validation).
+pub const KNOWN_CATEGORIES: &[&str] = &[
+    "greeting",
+    "os_control",
+    "research",
+    "trading",
+    "scheduling",
+    "coding",
+    "browser",
+    "media",
+    "agent_management",
+    "general",
+];
+
+/// Dynamic tool selector — filters the full tool set based on LLM classification.
+#[derive(Debug, Clone)]
+pub struct ToolSelector {
+    /// Model to use for the fast classification call.
+    pub model: String,
+    /// Category → tool name patterns (supports trailing `*` wildcard).
+    pub tool_groups: HashMap<String, Vec<String>>,
+}
+
+impl ToolSelector {
+    /// Create from a routing config.
+    pub fn from_config(config: &ModelRoutingConfig) -> Self {
+        Self {
+            model: config.tool_selector_model.clone(),
+            tool_groups: config.tool_groups.clone(),
+        }
+    }
+
+    /// Parse the JSON array returned by the classifier.
+    ///
+    /// Returns `None` on parse failure (caller should fall back to all tools).
+    pub fn parse_categories(response: &str) -> Option<Vec<String>> {
+        // Try to find a JSON array in the response (the model might wrap it in markdown etc.)
+        let trimmed = response.trim();
+
+        // Fast path: response is just the array
+        if let Ok(cats) = serde_json::from_str::<Vec<String>>(trimmed) {
+            return Some(cats);
+        }
+
+        // Try extracting the first `[…]` block
+        if let Some(start) = trimmed.find('[') {
+            if let Some(end) = trimmed.rfind(']') {
+                if end > start {
+                    let bracket_content = &trimmed[start..=end];
+                    // Try strict JSON first
+                    if let Ok(cats) = serde_json::from_str::<Vec<String>>(bracket_content) {
+                        return Some(cats);
+                    }
+                    // Fallback: handle unquoted category names like [research, general]
+                    // Small local models often omit quotes around simple identifiers.
+                    let inner = &trimmed[start + 1..end];
+                    let cats: Vec<String> = inner
+                        .split(',')
+                        .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !cats.is_empty()
+                        && cats
+                            .iter()
+                            .all(|c| KNOWN_CATEGORIES.contains(&c.as_str()))
+                    {
+                        return Some(cats);
+                    }
+                }
+            }
+        }
+
+        warn!(raw = %trimmed, "Tool selector returned unparseable response — falling back to all tools");
+        None
+    }
+
+    /// Given selected categories, resolve them to tool name patterns.
+    pub fn patterns_for_categories(&self, categories: &[String]) -> Vec<String> {
+        let mut patterns = Vec::new();
+        for cat in categories {
+            if let Some(pats) = self.tool_groups.get(cat.as_str()) {
+                for p in pats {
+                    if !patterns.contains(p) {
+                        patterns.push(p.clone());
+                    }
+                }
+            }
+        }
+        patterns
+    }
+
+    /// Filter a tool list, keeping only tools whose name matches at least one pattern.
+    ///
+    /// Patterns support:
+    /// - Exact match: `"web_search"` matches tool named `"web_search"`
+    /// - Trailing wildcard: `"mcp_macos_*"` matches `"mcp_macos_open_app"`, `"mcp_macos_click"`, etc.
+    pub fn filter_tools(tools: &[ToolDefinition], patterns: &[String]) -> Vec<ToolDefinition> {
+        if patterns.is_empty() {
+            return vec![];
+        }
+        tools
+            .iter()
+            .filter(|t| patterns.iter().any(|p| pattern_matches(p, &t.name)))
+            .cloned()
+            .collect()
+    }
+}
+
+/// Check if a pattern (possibly with trailing `*`) matches a tool name.
+fn pattern_matches(pattern: &str, name: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        name.starts_with(prefix)
+    } else {
+        name == pattern
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +352,7 @@ mod tests {
             complex_model: "claude-opus-4-6".to_string(),
             simple_threshold: 200,
             complex_threshold: 800,
+            ..Default::default()
         }
     }
 
@@ -337,6 +475,7 @@ mod tests {
             complex_model: "claude-opus-4-6".to_string(),
             simple_threshold: 200,
             complex_threshold: 800,
+            ..Default::default()
         };
         let router = ModelRouter::new(config);
         let warnings = router.validate_models(&catalog);
@@ -352,6 +491,7 @@ mod tests {
             complex_model: "claude-opus-4-6".to_string(),
             simple_threshold: 200,
             complex_threshold: 800,
+            ..Default::default()
         };
         let router = ModelRouter::new(config);
         let warnings = router.validate_models(&catalog);
@@ -368,6 +508,7 @@ mod tests {
             complex_model: "opus".to_string(),
             simple_threshold: 200,
             complex_threshold: 800,
+            ..Default::default()
         };
         let mut router = ModelRouter::new(config);
         router.resolve_aliases(&catalog);
@@ -410,5 +551,149 @@ mod tests {
 
         // Long system prompt should score higher or equal
         assert!(complexity_with_long_system as u32 >= complexity_short as u32);
+    }
+
+    // ── ToolSelector tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_pattern_matches_exact() {
+        assert!(pattern_matches("web_search", "web_search"));
+        assert!(!pattern_matches("web_search", "web_fetch"));
+    }
+
+    #[test]
+    fn test_pattern_matches_wildcard() {
+        assert!(pattern_matches("mcp_macos_*", "mcp_macos_open_app"));
+        assert!(pattern_matches("mcp_macos_*", "mcp_macos_click"));
+        assert!(pattern_matches("mcp_macos_*", "mcp_macos_"));
+        assert!(!pattern_matches("mcp_macos_*", "mcp_linux_open_app"));
+        assert!(!pattern_matches("mcp_macos_*", "web_search"));
+    }
+
+    #[test]
+    fn test_parse_categories_valid_json() {
+        let cats = ToolSelector::parse_categories(r#"["greeting", "os_control"]"#).unwrap();
+        assert_eq!(cats, vec!["greeting", "os_control"]);
+    }
+
+    #[test]
+    fn test_parse_categories_empty_array() {
+        let cats = ToolSelector::parse_categories("[]").unwrap();
+        assert!(cats.is_empty());
+    }
+
+    #[test]
+    fn test_parse_categories_wrapped_in_markdown() {
+        let response = "```json\n[\"research\", \"general\"]\n```";
+        let cats = ToolSelector::parse_categories(response).unwrap();
+        assert_eq!(cats, vec!["research", "general"]);
+    }
+
+    #[test]
+    fn test_parse_categories_with_preamble() {
+        let response = "Based on the message, the categories are: [\"coding\"]";
+        let cats = ToolSelector::parse_categories(response).unwrap();
+        assert_eq!(cats, vec!["coding"]);
+    }
+
+    #[test]
+    fn test_parse_categories_invalid() {
+        assert!(ToolSelector::parse_categories("not json at all").is_none());
+        assert!(ToolSelector::parse_categories("").is_none());
+    }
+
+    #[test]
+    fn test_parse_categories_unquoted() {
+        // Small local models often return unquoted category names
+        let cats = ToolSelector::parse_categories("[research]").unwrap();
+        assert_eq!(cats, vec!["research"]);
+    }
+
+    #[test]
+    fn test_parse_categories_unquoted_multiple() {
+        let cats = ToolSelector::parse_categories("[research, general]").unwrap();
+        assert_eq!(cats, vec!["research", "general"]);
+    }
+
+    #[test]
+    fn test_parse_categories_unquoted_unknown_rejected() {
+        // Unknown categories should not be accepted via the unquoted path
+        assert!(ToolSelector::parse_categories("[unknown_category]").is_none());
+    }
+
+    #[test]
+    fn test_filter_tools_exact_match() {
+        let tools = vec![
+            ToolDefinition { name: "web_search".into(), description: String::new(), input_schema: serde_json::json!({}) },
+            ToolDefinition { name: "web_fetch".into(), description: String::new(), input_schema: serde_json::json!({}) },
+            ToolDefinition { name: "file_read".into(), description: String::new(), input_schema: serde_json::json!({}) },
+        ];
+        let patterns = vec!["web_search".to_string()];
+        let filtered = ToolSelector::filter_tools(&tools, &patterns);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "web_search");
+    }
+
+    #[test]
+    fn test_filter_tools_wildcard() {
+        let tools = vec![
+            ToolDefinition { name: "mcp_macos_open".into(), description: String::new(), input_schema: serde_json::json!({}) },
+            ToolDefinition { name: "mcp_macos_click".into(), description: String::new(), input_schema: serde_json::json!({}) },
+            ToolDefinition { name: "mcp_sshbox_exec".into(), description: String::new(), input_schema: serde_json::json!({}) },
+            ToolDefinition { name: "web_search".into(), description: String::new(), input_schema: serde_json::json!({}) },
+        ];
+        let patterns = vec!["mcp_macos_*".to_string()];
+        let filtered = ToolSelector::filter_tools(&tools, &patterns);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|t| t.name.starts_with("mcp_macos_")));
+    }
+
+    #[test]
+    fn test_filter_tools_empty_patterns_returns_empty() {
+        let tools = vec![
+            ToolDefinition { name: "web_search".into(), description: String::new(), input_schema: serde_json::json!({}) },
+        ];
+        let filtered = ToolSelector::filter_tools(&tools, &[]);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_patterns_for_categories() {
+        let selector = ToolSelector::from_config(&ModelRoutingConfig::default());
+        let patterns = selector.patterns_for_categories(&["research".to_string()]);
+        assert!(patterns.contains(&"web_search".to_string()));
+        assert!(patterns.contains(&"web_fetch".to_string()));
+        assert!(patterns.contains(&"memory_*".to_string()));
+    }
+
+    #[test]
+    fn test_greeting_category_returns_no_patterns() {
+        let selector = ToolSelector::from_config(&ModelRoutingConfig::default());
+        let patterns = selector.patterns_for_categories(&["greeting".to_string()]);
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_categories_deduplicate() {
+        let selector = ToolSelector::from_config(&ModelRoutingConfig::default());
+        // Both research and general include "web_search" and "memory_*"
+        let patterns = selector.patterns_for_categories(&[
+            "research".to_string(),
+            "general".to_string(),
+        ]);
+        let web_search_count = patterns.iter().filter(|p| p.as_str() == "web_search").count();
+        assert_eq!(web_search_count, 1, "web_search should not be duplicated");
+    }
+
+    #[test]
+    fn test_default_tool_groups_has_all_known_categories() {
+        let config = ModelRoutingConfig::default();
+        for cat in KNOWN_CATEGORIES {
+            assert!(
+                config.tool_groups.contains_key(*cat),
+                "Missing category '{}' in default tool_groups",
+                cat
+            );
+        }
     }
 }

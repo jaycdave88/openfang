@@ -2296,12 +2296,160 @@ impl OpenFangKernel {
         let messages_before = session.messages.len();
 
         let tools = self.available_tools(agent_id);
-        let tools = entry.mode.filter_tools(tools);
+        let mut tools = entry.mode.filter_tools(tools);
+
+        // ── Dynamic tool selection (two-stage routing) ────────────────────
+        // Stage 1: Use a fast classification model (no tools) to determine
+        // which tool categories are needed. Stage 2 filters the full tool
+        // list to only matching tools, reducing the system prompt size.
+        let original_tool_count = tools.len();
+        if let Some(ref routing_config) = entry.manifest.routing {
+            if routing_config.dynamic_tool_selection && !tools.is_empty() {
+                use openfang_runtime::routing::{ToolSelector, TOOL_SELECTOR_SYSTEM_PROMPT};
+
+                let selector = ToolSelector::from_config(routing_config);
+
+                // Look up the tool selector model in the catalog to find its provider
+                let (ts_provider, ts_model_id) = {
+                    let catalog = self.model_catalog.read().unwrap_or_else(|e| e.into_inner());
+                    if let Some(cat_entry) = catalog.find_model(&selector.model) {
+                        (cat_entry.provider.clone(), cat_entry.id.clone())
+                    } else {
+                        warn!(model = %selector.model, "Tool selector model not in catalog, trying Ollama");
+                        ("ollama".to_string(), selector.model.clone())
+                    }
+                }; // catalog guard dropped here
+
+                // Classify the message using the tool selector model.
+                //
+                // For Ollama providers we use the native `/api/chat` endpoint
+                // with `think: false` so thinking models (Qwen3, DeepSeek-R1)
+                // skip their reasoning chain and respond in ~1-2s instead of
+                // timing out.  Other providers go through the standard driver.
+                let selector_result: Option<Vec<String>> = if ts_provider == "ollama" {
+                    // ── Ollama native API path (thinking disabled) ──────
+                    let ollama_base = std::env::var("OLLAMA_HOST")
+                        .unwrap_or_else(|_| "http://localhost:11434".to_string());
+                    let url = format!("{}/api/chat", ollama_base.trim_end_matches('/'));
+
+                    let body = serde_json::json!({
+                        "model": ts_model_id,
+                        "messages": [
+                            {"role": "system", "content": TOOL_SELECTOR_SYSTEM_PROMPT},
+                            {"role": "user",   "content": message}
+                        ],
+                        "stream": false,
+                        "think": false,
+                        "options": {"temperature": 0}
+                    });
+
+                    let client = reqwest::Client::new();
+                    let start = std::time::Instant::now();
+                    match client.post(&url)
+                        .header("content-type", "application/json")
+                        .json(&body)
+                        .timeout(std::time::Duration::from_secs(30))
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => {
+                            match resp.json::<serde_json::Value>().await {
+                                Ok(json) => {
+                                    let elapsed = start.elapsed();
+                                    let text = json["message"]["content"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string();
+                                    info!(
+                                        agent = %entry.name,
+                                        elapsed_ms = elapsed.as_millis() as u64,
+                                        raw_response = %text,
+                                        "Tool selector classification complete (Ollama native)"
+                                    );
+                                    ToolSelector::parse_categories(&text)
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "Tool selector Ollama response parse failed — using all tools");
+                                    None
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Tool selector Ollama call failed — using all tools");
+                            None
+                        }
+                    }
+                } else {
+                    // ── Standard driver path (non-Ollama providers) ─────
+                    let selector_driver = {
+                        let driver_config = DriverConfig {
+                            provider: ts_provider,
+                            api_key: None,
+                            base_url: None,
+                            skip_permissions: true,
+                        };
+                        drivers::create_driver(&driver_config)
+                    };
+
+                    match selector_driver {
+                        Err(e) => {
+                            warn!(error = %e, "Failed to create tool selector driver — using all tools");
+                            None
+                        }
+                        Ok(driver) => {
+                            let classify_request = CompletionRequest {
+                                model: ts_model_id,
+                                messages: vec![openfang_types::message::Message::user(message)],
+                                tools: vec![],
+                                max_tokens: 256,
+                                temperature: 0.0,
+                                system: Some(TOOL_SELECTOR_SYSTEM_PROMPT.to_string()),
+                                thinking: None,
+                            };
+
+                            let start = std::time::Instant::now();
+                            match driver.complete(classify_request).await {
+                                Ok(response) => {
+                                    let elapsed = start.elapsed();
+                                    let text = response.text();
+                                    info!(
+                                        agent = %entry.name,
+                                        elapsed_ms = elapsed.as_millis() as u64,
+                                        raw_response = %text,
+                                        "Tool selector classification complete"
+                                    );
+                                    ToolSelector::parse_categories(&text)
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "Tool selector LLM call failed — using all tools");
+                                    None
+                                }
+                            }
+                        }
+                    }
+                };
+
+                if let Some(categories) = selector_result {
+                    let patterns = selector.patterns_for_categories(&categories);
+                    let filtered = ToolSelector::filter_tools(&tools, &patterns);
+                    info!(
+                        agent = %entry.name,
+                        categories = ?categories,
+                        patterns = ?patterns,
+                        original_count = original_tool_count,
+                        filtered_count = filtered.len(),
+                        "Dynamic tool selection applied"
+                    );
+                    tools = filtered;
+                }
+            }
+        }
 
         info!(
             agent = %entry.name,
             agent_id = %agent_id,
             tool_count = tools.len(),
+            original_tool_count = original_tool_count,
             tool_names = ?tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
             "Tools selected for LLM request"
         );
@@ -3306,6 +3454,10 @@ impl OpenFangKernel {
             ],
             autonomous: def.agent.max_iterations.map(|max_iter| AutonomousConfig {
                 max_iterations: max_iter,
+                // Hands are idle most of the time (waiting for tasks), so use a high
+                // heartbeat interval to avoid false "unresponsive" detections.
+                // Timeout = heartbeat_interval_secs * 2 = 600s.
+                heartbeat_interval_secs: 300,
                 ..Default::default()
             }),
             // Autonomous hands must run in Continuous mode so the background loop picks them up.
