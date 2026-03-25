@@ -1,0 +1,156 @@
+##############################################################################
+# Mac Studio AI Harness — Full Stack Orchestration
+#
+# Security model: All services bind to 127.0.0.1 only.
+# Tailscale runs natively on macOS — remote access is VPN-only.
+# No ports are exposed to the LAN or internet.
+##############################################################################
+
+services:
+
+  # ── Ollama (Local LLM Inference on Apple Silicon) ────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_NUM_PARALLEL=4
+    deploy:
+      resources:
+        limits:
+          memory: 32G
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - harness-internal
+
+  # ── OpenFang (Agent Operating System) ────────────────────────────────────
+  openfang:
+    build:
+      context: ./vendor/openfang
+      dockerfile: Dockerfile
+    container_name: openfang
+    ports:
+      - "127.0.0.1:4200:4200"
+    volumes:
+      - openfang-data:/data
+      - ./config/openfang/config.toml:/data/config.toml:ro
+    environment:
+      - OPENFANG_HOME=/data
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OPENFANG_API_KEY=${OPENFANG_API_KEY:?Set OPENFANG_API_KEY in .env}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-H", "Authorization: Bearer ${OPENFANG_API_KEY}", "http://localhost:4200/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - harness-internal
+
+  # ── DeerFlow A2A Adapter (Deep Research Agent) ───────────────────────────
+  deerflow:
+    build:
+      context: ./adapters
+      dockerfile: deerflow/Dockerfile
+    container_name: deerflow-a2a
+    ports:
+      - "127.0.0.1:8100:8100"
+    environment:
+      - A2A_PORT=8100
+      - A2A_HOST=0.0.0.0
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OPENAI_API_BASE=http://ollama:11434/v1
+      - OPENAI_API_KEY=not-needed
+      - DEFAULT_MODEL=${DEERFLOW_MODEL:-llama3.2}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8100/.well-known/agent.json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - harness-internal
+
+  # ── TradingAgents A2A Adapter (Financial Analysis) ──────────────────────
+  tradingagents:
+    build:
+      context: ./adapters
+      dockerfile: tradingagents/Dockerfile
+    container_name: tradingagents-a2a
+    ports:
+      - "127.0.0.1:8200:8200"
+    environment:
+      - A2A_PORT=8200
+      - A2A_HOST=0.0.0.0
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OPENAI_API_BASE=http://ollama:11434/v1
+      - OPENAI_API_KEY=not-needed
+      - DEFAULT_MODEL=${TRADING_MODEL:-llama3.2}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8200/.well-known/agent.json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - harness-internal
+
+  # ── MicroFish A2A Adapter (Spec Validation & Code Review) ───────────────
+  microfish:
+    build:
+      context: ./adapters
+      dockerfile: microfish/Dockerfile
+    container_name: microfish-a2a
+    ports:
+      - "127.0.0.1:8300:8300"
+    environment:
+      - A2A_PORT=8300
+      - A2A_HOST=0.0.0.0
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OPENAI_API_BASE=http://ollama:11434/v1
+      - OPENAI_API_KEY=not-needed
+      - DEFAULT_MODEL=${MICROFISH_MODEL:-llama3.2}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8300/.well-known/agent.json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - harness-internal
+
+volumes:
+  ollama-models:
+  openfang-data:
+
+networks:
+  harness-internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
