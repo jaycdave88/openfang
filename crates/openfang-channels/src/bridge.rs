@@ -602,12 +602,16 @@ async fn dispatch_message(
     }
 
     // --- Rate limiting ---
+    // NOTE: We silently drop rate-limited messages instead of sending a response.
+    // Sending "Rate limit exceeded" back to the channel creates a feedback loop:
+    // the bot's own response gets picked up by the sync, triggering another rate
+    // limit check, which sends another response, ad infinitum.
     if let Some(ref ov) = overrides {
         if ov.rate_limit_per_user > 0 {
             if let Err(msg) =
                 rate_limiter.check(ct_str, sender_user_id(message), ov.rate_limit_per_user)
             {
-                send_response(adapter, &message.sender, msg, thread_id, output_format).await;
+                warn!("{msg} (channel={ct_str}, user={})", sender_user_id(message));
                 return;
             }
         }
