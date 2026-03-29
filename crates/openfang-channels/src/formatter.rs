@@ -512,6 +512,13 @@ fn markdown_to_wecom_plain(text: &str) -> String {
     collapsed.join("\n").trim().to_string()
 }
 
+/// Convert Markdown to clean plain text for iMessage delivery.
+/// iMessage does not render Markdown, so we strip all formatting syntax
+/// while preserving the readable content.
+pub fn markdown_to_imessage_plain(text: &str) -> String {
+    markdown_to_wecom_plain(text)
+}
+
 /// Strip all Markdown formatting, producing plain text.
 fn markdown_to_plain(text: &str) -> String {
     let mut result = text.to_string();
@@ -670,6 +677,26 @@ mod tests {
         assert_eq!(
             result,
             "Title\n\nquoted text\n\ndone item\ntodo item\n\nlet value = 1;\n\ndocs (https://example.com)"
+        );
+    }
+
+    #[test]
+    fn test_imessage_plain_strips_markdown() {
+        let result = markdown_to_imessage_plain(
+            "## Heading\n\
+             \n\
+             **Bold text** and *italic text*\n\
+             \n\
+             ```python\n\
+             def hello():\n\
+                 print('world')\n\
+             ```\n\
+             \n\
+             [Link](https://example.com)\n",
+        );
+        assert_eq!(
+            result,
+            "Heading\n\nBold text and italic text\n\ndef hello():\nprint('world')\n\nLink (https://example.com)"
         );
     }
 }

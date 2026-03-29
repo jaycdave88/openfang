@@ -120,6 +120,7 @@ pub async fn build_router(
 
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
+        .route("/trading", axum::routing::get(webchat::trading_page))
         .route("/logo.png", axum::routing::get(webchat::logo_png))
         .route("/favicon.ico", axum::routing::get(webchat::favicon_ico))
         .route("/manifest.json", axum::routing::get(webchat::manifest_json))
@@ -703,6 +704,13 @@ pub async fn build_router(
         .route("/api/auth/login", axum::routing::post(routes::auth_login))
         .route("/api/auth/logout", axum::routing::post(routes::auth_logout))
         .route("/api/auth/check", axum::routing::get(routes::auth_check))
+        // Trading dashboard endpoints
+        .route("/api/trading/portfolio", axum::routing::get(routes::trading_portfolio))
+        .route("/api/trading/trades", axum::routing::get(routes::trading_trades))
+        .route("/api/trading/predictions", axum::routing::get(routes::trading_predictions))
+        .route("/api/trading/accuracy", axum::routing::get(routes::trading_accuracy))
+        .route("/api/trading/learnings", axum::routing::get(routes::trading_learnings))
+        .route("/api/trading/dashboard", axum::routing::get(routes::trading_dashboard))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             middleware::auth,

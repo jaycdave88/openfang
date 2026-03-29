@@ -122,7 +122,13 @@ impl MockHandle {
 
 #[async_trait]
 impl ChannelBridgeHandle for MockHandle {
-    async fn send_message(&self, agent_id: AgentId, message: &str) -> Result<String, String> {
+    async fn send_message(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        _sender_id: Option<&str>,
+        _sender_name: Option<&str>,
+    ) -> Result<String, String> {
         self.received
             .lock()
             .unwrap()

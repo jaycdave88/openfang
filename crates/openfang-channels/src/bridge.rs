@@ -27,15 +27,28 @@ use tracing::{debug, error, info, warn};
 #[async_trait]
 pub trait ChannelBridgeHandle: Send + Sync {
     /// Send a message to an agent and get the text response.
-    async fn send_message(&self, agent_id: AgentId, message: &str) -> Result<String, String>;
+    ///
+    /// `sender_id` and `sender_name` are optional user identifiers passed to the agent's
+    /// system prompt so the LLM knows who it's talking to. This enables per-user context
+    /// in multi-user channels like Discord, preventing conversation cross-contamination.
+    async fn send_message(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender_id: Option<&str>,
+        sender_name: Option<&str>,
+    ) -> Result<String, String>;
 
     /// Send a message with structured content blocks (text + images) to an agent.
     ///
     /// Default implementation extracts text from blocks and falls back to `send_message()`.
+    /// `sender_id` and `sender_name` are passed through for user context.
     async fn send_message_with_blocks(
         &self,
         agent_id: AgentId,
         blocks: Vec<ContentBlock>,
+        sender_id: Option<&str>,
+        sender_name: Option<&str>,
     ) -> Result<String, String> {
         // Default: extract text from blocks and send as plain text
         let text: String = blocks
@@ -46,7 +59,7 @@ pub trait ChannelBridgeHandle: Send + Sync {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        self.send_message(agent_id, &text).await
+        self.send_message(agent_id, &text, sender_id, sender_name).await
     }
 
     /// Find an agent by name, returning its ID.
@@ -757,6 +770,10 @@ async fn dispatch_message(
 
             let typing_task = spawn_typing_loop(adapter_arc.clone(), message.sender.clone());
 
+            // Extract sender info for broadcast messages
+            let sender_id_str = sender_user_id(message);
+            let sender_name = message.sender.display_name.as_str();
+
             let strategy = router.broadcast_strategy();
             let mut responses = Vec::new();
 
@@ -769,8 +786,10 @@ async fn dispatch_message(
                             let t = text.clone();
                             let aid = *aid;
                             let name = name.clone();
+                            let sid = sender_id_str.to_string();
+                            let sname = sender_name.to_string();
                             handles_vec.push(tokio::spawn(async move {
-                                let result = h.send_message(aid, &t).await;
+                                let result = h.send_message(aid, &t, Some(&sid), Some(&sname)).await;
                                 (name, aid, result)
                             }));
                         }
@@ -787,7 +806,10 @@ async fn dispatch_message(
                 openfang_types::config::BroadcastStrategy::Sequential => {
                     for (name, maybe_id) in &targets {
                         if let Some(aid) = maybe_id {
-                            match handle.send_message(*aid, &text).await {
+                            match handle
+                                .send_message(*aid, &text, Some(sender_id_str), Some(sender_name))
+                                .await
+                            {
                                 Ok(r) => responses.push(format!("[{name}]: {r}")),
                                 Err(e) => responses.push(format!("[{name}]: Error: {e}")),
                             }
@@ -895,7 +917,13 @@ async fn dispatch_message(
     let typing_task = spawn_typing_loop(adapter_arc.clone(), message.sender.clone());
 
     // Send to agent and relay response
-    let result = handle.send_message(agent_id, &text).await;
+    // Pass sender identity so the agent knows who it's talking to (prevents
+    // conversation cross-contamination in multi-user channels like Discord).
+    let sender_id_str = sender_user_id(message);
+    let sender_name = message.sender.display_name.as_str();
+    let result = handle
+        .send_message(agent_id, &text, Some(sender_id_str), Some(sender_name))
+        .await;
 
     // Stop the typing refresh now that we have a response
     typing_task.abort();
@@ -921,7 +949,9 @@ async fn dispatch_message(
             // Try re-resolution before reporting error
             if let Some(new_id) = try_reresolution(&e, &channel_key, handle, router).await {
                 let typing_task2 = spawn_typing_loop(adapter_arc.clone(), message.sender.clone());
-                let retry = handle.send_message(new_id, &text).await;
+                let retry = handle
+                    .send_message(new_id, &text, Some(sender_id_str), Some(sender_name))
+                    .await;
                 typing_task2.abort();
                 match retry {
                     Ok(response) => {
@@ -1291,8 +1321,12 @@ async fn dispatch_with_blocks(
     // Continuous typing indicator (see spawn_typing_loop doc)
     let typing_task = spawn_typing_loop(adapter_arc.clone(), message.sender.clone());
 
+    // Pass sender identity for per-user context
+    let sender_id_str = sender_user_id(message);
+    let sender_name = message.sender.display_name.as_str();
+
     let result = handle
-        .send_message_with_blocks(agent_id, blocks.clone())
+        .send_message_with_blocks(agent_id, blocks.clone(), Some(sender_id_str), Some(sender_name))
         .await;
 
     typing_task.abort();
@@ -1318,7 +1352,9 @@ async fn dispatch_with_blocks(
             // Try re-resolution before reporting error
             if let Some(new_id) = try_reresolution(&e, &channel_key, handle, router).await {
                 let typing_task2 = spawn_typing_loop(adapter_arc.clone(), message.sender.clone());
-                let retry = handle.send_message_with_blocks(new_id, blocks).await;
+                let retry = handle
+                    .send_message_with_blocks(new_id, blocks, Some(sender_id_str), Some(sender_name))
+                    .await;
                 typing_task2.abort();
                 match retry {
                     Ok(response) => {
@@ -1697,7 +1733,13 @@ mod tests {
 
     #[async_trait]
     impl ChannelBridgeHandle for MockHandle {
-        async fn send_message(&self, _agent_id: AgentId, message: &str) -> Result<String, String> {
+        async fn send_message(
+            &self,
+            _agent_id: AgentId,
+            message: &str,
+            _sender_id: Option<&str>,
+            _sender_name: Option<&str>,
+        ) -> Result<String, String> {
             Ok(format!("Echo: {message}"))
         }
         async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
@@ -1745,7 +1787,10 @@ mod tests {
         assert_eq!(not_found, None);
 
         // Verify send_message echoes
-        let response = handle.send_message(agent_id, "hello").await.unwrap();
+        let response = handle
+            .send_message(agent_id, "hello", None, None)
+            .await
+            .unwrap();
         assert_eq!(response, "Echo: hello");
     }
 
@@ -1892,7 +1937,7 @@ mod tests {
 
         // Default impl should extract text and call send_message
         let result = handle
-            .send_message_with_blocks(agent_id, blocks)
+            .send_message_with_blocks(agent_id, blocks, None, None)
             .await
             .unwrap();
         assert_eq!(result, "Echo: What is in this photo?");
@@ -1913,7 +1958,7 @@ mod tests {
 
         // Default impl sends empty text when no text blocks
         let result = handle
-            .send_message_with_blocks(agent_id, blocks)
+            .send_message_with_blocks(agent_id, blocks, None, None)
             .await
             .unwrap();
         assert_eq!(result, "Echo: ");

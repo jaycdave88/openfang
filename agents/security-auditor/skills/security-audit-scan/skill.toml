@@ -1,0 +1,21 @@
+[skill]
+name = "security-audit-scan"
+version = "0.1.0"
+description = "Scans git repos for malicious patterns, audits dependencies, checks for data exfiltration, and generates PASS/FAIL/WARN security reports."
+author = "momo"
+license = "MIT"
+tags = ["security", "audit", "scanning", "dependencies", "gatekeeper"]
+
+[runtime]
+type = "python"
+entry = "src/main.py"
+
+[[tools.provided]]
+name = "security_scan"
+description = "Run a comprehensive security scan on a git repository. Checks for malicious code patterns, dependency vulnerabilities, data exfiltration paths, and generates a PASS/FAIL/WARN report with risk score."
+input_schema = { type = "object", properties = { repo_path = { type = "string", description = "Absolute path to the git repository to scan" }, check_deps = { type = "boolean", description = "Whether to run dependency audits (pip-audit, npm audit). Default true.", default = true }, allowlist_path = { type = "string", description = "Path to allowlist/blocklist TOML config. Default ~/.openfang/security-allowlist.toml" } }, required = ["repo_path"] }
+
+[requirements]
+tools = ["shell_exec", "file_read"]
+capabilities = ["ShellExec(python3)"]
+

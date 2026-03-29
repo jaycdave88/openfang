@@ -17,6 +17,9 @@ use openfang_types::agent::{AgentId, AgentIdentity, AgentManifest};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
+use openfang_runtime::paper_trading::PaperTradingEngine;
+use openfang_runtime::prediction_tracker::PredictionTracker;
+use openfang_runtime::self_learning::SelfLearning;
 
 /// Shared application state.
 ///
@@ -11378,4 +11381,184 @@ mod channel_config_tests {
                 .required
         );
     }
+}
+
+// ─── Trading Dashboard API ──────────────────────────────────────────────────
+
+/// Helper to get database path from home directory.
+fn get_db_path(home_dir: &std::path::Path, db_name: &str) -> std::path::PathBuf {
+    home_dir.join(db_name)
+}
+
+/// GET /api/trading/portfolio — Current portfolio status.
+pub async fn trading_portfolio(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let db_path = get_db_path(&state.kernel.config.home_dir, "paper_trading.db");
+
+    match PaperTradingEngine::open(&db_path) {
+        Ok(engine) => match engine.get_account_status() {
+            Ok(status) => {
+                let pnl_pct = if status.balance > 0.0 {
+                    ((status.total_value - 100_000.0) / 100_000.0) * 100.0
+                } else {
+                    0.0
+                };
+
+                (StatusCode::OK, Json(serde_json::json!({
+                    "balance": status.balance,
+                    "total_value": status.total_value,
+                    "positions": status.positions,
+                    "pnl_pct": pnl_pct,
+                })))
+            }
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            ),
+        },
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// GET /api/trading/trades?limit=50 — Recent trades.
+pub async fn trading_trades(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let limit: usize = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
+
+    let db_path = get_db_path(&state.kernel.config.home_dir, "paper_trading.db");
+
+    match PaperTradingEngine::open(&db_path) {
+        Ok(engine) => match engine.get_trade_history(None, Some(limit)) {
+            Ok(trades) => (StatusCode::OK, Json(serde_json::json!(trades))),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            ),
+        },
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// GET /api/trading/predictions?status=open&limit=50 — Predictions.
+pub async fn trading_predictions(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let status = params.get("status").map(|s| s.as_str());
+    let limit: i64 = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
+
+    let db_path = get_db_path(&state.kernel.config.home_dir, "predictions.db");
+
+    match PredictionTracker::open(&db_path) {
+        Ok(tracker) => match tracker.list_predictions(status, Some(limit)) {
+            Ok(predictions) => (StatusCode::OK, Json(serde_json::json!(predictions))),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            ),
+        },
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// GET /api/trading/accuracy?period=30 — Accuracy stats.
+pub async fn trading_accuracy(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let period: i64 = params
+        .get("period")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
+
+    let db_path = get_db_path(&state.kernel.config.home_dir, "predictions.db");
+
+    match PredictionTracker::open(&db_path) {
+        Ok(tracker) => match tracker.get_accuracy_stats(Some(period)) {
+            Ok(stats) => (StatusCode::OK, Json(stats)),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            ),
+        },
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// GET /api/trading/learnings — Latest insights.
+pub async fn trading_learnings(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let db_path = get_db_path(&state.kernel.config.home_dir, "learning.db");
+
+    match SelfLearning::open(&db_path) {
+        Ok(learning) => match learning.get_recent_learnings(10) {
+            Ok(learnings) => (StatusCode::OK, Json(serde_json::json!(learnings))),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            ),
+        },
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// GET /api/trading/dashboard — Combined summary.
+pub async fn trading_dashboard(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let paper_db = get_db_path(&state.kernel.config.home_dir, "paper_trading.db");
+    let pred_db = get_db_path(&state.kernel.config.home_dir, "predictions.db");
+    let learn_db = get_db_path(&state.kernel.config.home_dir, "learning.db");
+
+    let portfolio = PaperTradingEngine::open(&paper_db)
+        .and_then(|e| e.get_account_status())
+        .ok();
+
+    let recent_trades = PaperTradingEngine::open(&paper_db)
+        .and_then(|e| e.get_trade_history(None, Some(10)))
+        .ok();
+
+    let predictions = PredictionTracker::open(&pred_db)
+        .and_then(|t| t.list_predictions(Some("open"), Some(10)))
+        .ok();
+
+    let accuracy_30d = PredictionTracker::open(&pred_db)
+        .and_then(|t| t.get_accuracy_stats(Some(30)))
+        .ok();
+
+    let accuracy_7d = PredictionTracker::open(&pred_db)
+        .and_then(|t| t.get_accuracy_stats(Some(7)))
+        .ok();
+
+    let learnings = SelfLearning::open(&learn_db)
+        .and_then(|l| l.get_recent_learnings(5))
+        .ok();
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "portfolio": portfolio,
+        "recent_trades": recent_trades,
+        "predictions": predictions,
+        "accuracy_30d": accuracy_30d,
+        "accuracy_7d": accuracy_7d,
+        "learnings": learnings,
+    })))
 }

@@ -448,6 +448,29 @@ pub async fn execute_tool(
         // Canvas / A2UI tool
         "canvas_present" => tool_canvas_present(input, workspace_root).await,
 
+        // Paper trading tools
+        "paper_trade_buy" => tool_paper_trade_buy(input).await,
+        "paper_trade_sell" => tool_paper_trade_sell(input).await,
+        "portfolio_status" => tool_portfolio_status().await,
+        "trade_history" => tool_trade_history(input).await,
+
+        // Prediction tracker tools
+        "prediction_log" => tool_prediction_log(input).await,
+        "prediction_evaluate" => tool_prediction_evaluate(input).await,
+        "prediction_accuracy" => tool_prediction_accuracy(input).await,
+        "prediction_list" => tool_prediction_list(input).await,
+
+        // Self-learning tools
+        "learning_generate_report" => tool_learning_generate_report(input).await,
+        "learning_get_insights" => tool_learning_get_insights(input).await,
+        "learning_update_strategy" => tool_learning_update_strategy(input).await,
+
+        // Confidence gate tools
+        "gate_status" => tool_gate_status().await,
+        "gate_history" => tool_gate_history(input).await,
+        "gate_request_live" => tool_gate_request_live().await,
+        "gate_approve_live" => tool_gate_approve_live(input).await,
+
         other => {
             // Fallback 1: MCP tools (mcp_{server}_{tool} prefix)
             if mcp::is_mcp_tool(other) {
@@ -1244,6 +1267,180 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "title": { "type": "string", "description": "Optional title for the canvas panel" }
                 },
                 "required": ["html"]
+            }),
+        },
+        // --- Paper trading tools ---
+        ToolDefinition {
+            name: "paper_trade_buy".to_string(),
+            description: "Buy shares in the paper trading portfolio. Enforces risk limits: max 10% per position, max 5 concurrent positions.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ticker": { "type": "string", "description": "Stock ticker symbol (e.g., 'AAPL', 'TSLA')" },
+                    "shares": { "type": "integer", "description": "Number of shares to buy" },
+                    "price": { "type": "number", "description": "Optional limit price. If not provided, uses market price." },
+                    "reason": { "type": "string", "description": "Optional reason for the trade" }
+                },
+                "required": ["ticker", "shares"]
+            }),
+        },
+        ToolDefinition {
+            name: "paper_trade_sell".to_string(),
+            description: "Sell shares from the paper trading portfolio. Shows P&L for the trade.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ticker": { "type": "string", "description": "Stock ticker symbol (e.g., 'AAPL', 'TSLA')" },
+                    "shares": { "type": "integer", "description": "Number of shares to sell" },
+                    "price": { "type": "number", "description": "Optional limit price. If not provided, uses market price." },
+                    "reason": { "type": "string", "description": "Optional reason for the trade" }
+                },
+                "required": ["ticker", "shares"]
+            }),
+        },
+        ToolDefinition {
+            name: "portfolio_status".to_string(),
+            description: "Get current paper trading portfolio status including all positions, P&L, and total value.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDefinition {
+            name: "trade_history".to_string(),
+            description: "Get paper trading history. Can filter by ticker and limit results.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ticker": { "type": "string", "description": "Optional: filter by ticker symbol" },
+                    "limit": { "type": "integer", "description": "Optional: max number of trades to return (default: 100)" }
+                }
+            }),
+        },
+        // --- Prediction tracker tools ---
+        ToolDefinition {
+            name: "prediction_log".to_string(),
+            description: "Log a new market prediction with entry price, target price, direction, confidence, and timeframe. Tracks predictions for accuracy analysis.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ticker": { "type": "string", "description": "Stock ticker symbol (e.g., 'AAPL', 'TSLA')" },
+                    "direction": { "type": "string", "description": "Predicted direction: 'up', 'down', or 'flat'" },
+                    "entry_price": { "type": "number", "description": "Current/entry price when making the prediction" },
+                    "target_price": { "type": "number", "description": "Target price for the prediction" },
+                    "confidence": { "type": "number", "description": "Confidence level 0-100" },
+                    "timeframe_days": { "type": "integer", "description": "Number of days for the prediction to play out" },
+                    "reasoning": { "type": "string", "description": "Optional: reasoning behind the prediction" },
+                    "strategy": { "type": "string", "description": "Optional: strategy type (e.g., 'technical', 'fundamental', 'sentiment')" }
+                },
+                "required": ["ticker", "direction", "entry_price", "target_price", "confidence", "timeframe_days"]
+            }),
+        },
+        ToolDefinition {
+            name: "prediction_evaluate".to_string(),
+            description: "Evaluate open predictions against current market prices. Marks predictions as correct, incorrect, or expired based on actual price movements.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ticker": { "type": "string", "description": "Optional: evaluate only predictions for this ticker" },
+                    "current_prices": { "type": "object", "description": "Object with ticker: price pairs (e.g., {\"AAPL\": 150.25, \"TSLA\": 245.50})" }
+                },
+                "required": ["current_prices"]
+            }),
+        },
+        ToolDefinition {
+            name: "prediction_accuracy".to_string(),
+            description: "Calculate prediction accuracy statistics. Shows overall accuracy, per-ticker accuracy, and per-strategy accuracy for a given time period.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "period_days": { "type": "integer", "description": "Optional: calculate accuracy for last N days (e.g., 7, 30). Omit for all-time accuracy." }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "prediction_list".to_string(),
+            description: "List predictions with optional filtering by status. Returns prediction details including actual outcomes and accuracy scores.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string", "description": "Optional: filter by status ('open', 'correct', 'incorrect', 'expired')" },
+                    "limit": { "type": "integer", "description": "Optional: max number of predictions to return (default: 50)" }
+                }
+            }),
+        },
+        // --- Self-learning tools ---
+        ToolDefinition {
+            name: "learning_generate_report".to_string(),
+            description: "Generate a weekly self-learning report analyzing prediction accuracy. Identifies patterns, best/worst strategies, and generates actionable insights.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "period_days": { "type": "integer", "description": "Number of days to analyze (default: 7 for weekly)" }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "learning_get_insights".to_string(),
+            description: "Retrieve stored learning insights. Can filter by strategy name to see specific learnings.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "strategy": { "type": "string", "description": "Optional: filter insights related to a specific strategy" }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "learning_update_strategy".to_string(),
+            description: "Record a strategy adjustment based on learnings. Documents what changed and why.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "strategy": { "type": "string", "description": "Strategy name being adjusted" },
+                    "adjustment": { "type": "string", "description": "Description of the adjustment being made" },
+                    "reason": { "type": "string", "description": "Optional: reason for the adjustment" },
+                    "before_accuracy": { "type": "number", "description": "Optional: accuracy percentage before adjustment" }
+                },
+                "required": ["strategy", "adjustment"]
+            }),
+        },
+        // --- Confidence gate tools ---
+        ToolDefinition {
+            name: "gate_status".to_string(),
+            description: "Show all confidence gates and whether they're met. Gates include: Accuracy (>70%), Drawdown (<10%), Sharpe (>1.5), Data (30+ days), Human approval.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDefinition {
+            name: "gate_history".to_string(),
+            description: "Show confidence score history over time. Can filter by number of days.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "days": { "type": "integer", "description": "Optional: show history for last N days (e.g., 7, 30)" }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "gate_request_live".to_string(),
+            description: "Request to go live with real trading. Checks all gates and requires human approval. ALWAYS returns BLOCKED unless ALL gates are met.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDefinition {
+            name: "gate_approve_live".to_string(),
+            description: "Approve live trading with confirmation code. This switches from paper trading to live trading with REAL MONEY. Only use after gate_request_live provides a confirmation code.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "confirmation_code": { "type": "string", "description": "6-digit confirmation code from gate_request_live" },
+                    "approved_by": { "type": "string", "description": "Optional: name of person approving (default: 'user')" }
+                },
+                "required": ["confirmation_code"]
             }),
         },
     ]
@@ -3260,6 +3457,495 @@ async fn tool_canvas_present(
     serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
 }
 
+// ---------------------------------------------------------------------------
+// Paper trading tools
+// ---------------------------------------------------------------------------
+
+/// Get or create the paper trading engine instance.
+fn get_paper_trading_engine() -> Result<crate::paper_trading::PaperTradingEngine, String> {
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+
+    static ENGINE: OnceLock<Mutex<Option<crate::paper_trading::PaperTradingEngine>>> = OnceLock::new();
+
+    let mutex = ENGINE.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex.lock().map_err(|e| format!("Lock error: {e}"))?;
+
+    if guard.is_none() {
+        // Get the OpenFang home directory (~/.openfang)
+        let home_dir = if let Ok(home) = std::env::var("OPENFANG_HOME") {
+            PathBuf::from(home)
+        } else {
+            std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .map(|h| PathBuf::from(h).join(".openfang"))
+                .unwrap_or_else(|_| std::env::temp_dir().join(".openfang"))
+        };
+
+        let db_path = home_dir.join("paper_trading.db");
+
+        // Ensure directory exists
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create .openfang directory: {e}"))?;
+        }
+
+        let engine = crate::paper_trading::PaperTradingEngine::open(&db_path)?;
+        *guard = Some(engine);
+    }
+
+    guard.as_ref().cloned().ok_or_else(|| "Engine not initialized".to_string())
+}
+
+/// Paper trade buy tool handler.
+async fn tool_paper_trade_buy(input: &serde_json::Value) -> Result<String, String> {
+    let ticker = input["ticker"].as_str().ok_or("Missing 'ticker' parameter")?;
+    let shares = input["shares"].as_i64().ok_or("Missing 'shares' parameter")?;
+    let price = input["price"].as_f64();
+    let reason = input["reason"].as_str().map(|s| s.to_string());
+
+    let engine = get_paper_trading_engine()?;
+    engine.buy(ticker, shares, price, reason)
+}
+
+/// Paper trade sell tool handler.
+async fn tool_paper_trade_sell(input: &serde_json::Value) -> Result<String, String> {
+    let ticker = input["ticker"].as_str().ok_or("Missing 'ticker' parameter")?;
+    let shares = input["shares"].as_i64().ok_or("Missing 'shares' parameter")?;
+    let price = input["price"].as_f64();
+    let reason = input["reason"].as_str().map(|s| s.to_string());
+
+    let engine = get_paper_trading_engine()?;
+    engine.sell(ticker, shares, price, reason)
+}
+
+/// Portfolio status tool handler.
+async fn tool_portfolio_status() -> Result<String, String> {
+    let engine = get_paper_trading_engine()?;
+    let status = engine.get_account_status()?;
+
+    let mut output = format!(
+        "Paper Trading Portfolio\n\nCash Balance: ${:.2}\nTotal Value: ${:.2}\n\nPositions:\n",
+        status.balance, status.total_value
+    );
+
+    if status.positions.is_empty() {
+        output.push_str("  (no positions)\n");
+    } else {
+        for pos in &status.positions {
+            let pnl = pos.current_value - (pos.shares as f64 * pos.avg_cost);
+            let pnl_pct = (pnl / (pos.shares as f64 * pos.avg_cost)) * 100.0;
+            output.push_str(&format!(
+                "  {} - {} shares @ ${:.2} avg cost, current value: ${:.2} (P&L: ${:.2}, {:.2}%)\n",
+                pos.ticker, pos.shares, pos.avg_cost, pos.current_value, pnl, pnl_pct
+            ));
+        }
+    }
+
+    Ok(output)
+}
+
+/// Trade history tool handler.
+async fn tool_trade_history(input: &serde_json::Value) -> Result<String, String> {
+    let ticker = input["ticker"].as_str();
+    let limit = input["limit"].as_u64().map(|l| l as usize);
+
+    let engine = get_paper_trading_engine()?;
+    let trades = engine.get_trade_history(ticker, limit)?;
+
+    if trades.is_empty() {
+        return Ok("No trades found.".to_string());
+    }
+
+    let mut output = format!("Trade History ({} trades):\n\n", trades.len());
+    for trade in &trades {
+        output.push_str(&format!(
+            "{} - {} {} shares of {} @ ${:.2} (ID: {})\n",
+            trade.timestamp, trade.side.to_uppercase(), trade.shares, trade.ticker, trade.price, trade.id
+        ));
+        if let Some(ref reason) = trade.reason {
+            output.push_str(&format!("  Reason: {}\n", reason));
+        }
+    }
+
+    Ok(output)
+}
+
+// ---------------------------------------------------------------------------
+// Prediction tracker tools
+// ---------------------------------------------------------------------------
+
+/// Get or create the prediction tracker instance.
+fn get_prediction_tracker() -> Result<crate::prediction_tracker::PredictionTracker, String> {
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+
+    static TRACKER: OnceLock<Mutex<Option<crate::prediction_tracker::PredictionTracker>>> = OnceLock::new();
+
+    let mutex = TRACKER.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex.lock().map_err(|e| format!("Lock error: {e}"))?;
+
+    if guard.is_none() {
+        // Get the OpenFang home directory (~/.openfang)
+        let home_dir = if let Ok(home) = std::env::var("OPENFANG_HOME") {
+            PathBuf::from(home)
+        } else {
+            std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .map(|h| PathBuf::from(h).join(".openfang"))
+                .unwrap_or_else(|_| std::env::temp_dir().join(".openfang"))
+        };
+
+        let db_path = home_dir.join("predictions.db");
+
+        // Ensure directory exists
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create .openfang directory: {e}"))?;
+        }
+
+        let tracker = crate::prediction_tracker::PredictionTracker::open(&db_path)?;
+        *guard = Some(tracker);
+    }
+
+    guard.as_ref().cloned().ok_or_else(|| "Tracker not initialized".to_string())
+}
+
+/// Prediction log tool handler.
+async fn tool_prediction_log(input: &serde_json::Value) -> Result<String, String> {
+    let ticker = input["ticker"].as_str().ok_or("Missing 'ticker' parameter")?;
+    let direction = input["direction"].as_str().ok_or("Missing 'direction' parameter")?;
+    let target_price = input["target_price"].as_f64().ok_or("Missing 'target_price' parameter")?;
+    let confidence = input["confidence"].as_f64().ok_or("Missing 'confidence' parameter")?;
+    let timeframe_days = input["timeframe_days"].as_i64().ok_or("Missing 'timeframe_days' parameter")?;
+    let reasoning = input["reasoning"].as_str().map(|s| s.to_string());
+    let entry_price = input["entry_price"].as_f64().ok_or("Missing 'entry_price' parameter")?;
+    let strategy = input["strategy"].as_str().map(|s| s.to_string());
+
+    let tracker = get_prediction_tracker()?;
+    let id = tracker.log_prediction(
+        ticker,
+        direction,
+        target_price,
+        confidence,
+        timeframe_days,
+        reasoning,
+        entry_price,
+        strategy,
+    )?;
+
+    Ok(format!(
+        "Prediction logged successfully.\nID: {}\nTicker: {}\nDirection: {}\nEntry: ${:.2} → Target: ${:.2}\nConfidence: {:.1}%\nTimeframe: {} days",
+        id, ticker, direction, entry_price, target_price, confidence, timeframe_days
+    ))
+}
+
+/// Prediction evaluate tool handler.
+async fn tool_prediction_evaluate(input: &serde_json::Value) -> Result<String, String> {
+    let ticker = input["ticker"].as_str();
+
+    // Parse current prices from input
+    let prices_obj = input["current_prices"].as_object()
+        .ok_or("Missing 'current_prices' parameter (must be an object with ticker: price pairs)")?;
+
+    let mut current_prices = std::collections::HashMap::new();
+    for (ticker, price) in prices_obj {
+        if let Some(p) = price.as_f64() {
+            current_prices.insert(ticker.clone(), p);
+        }
+    }
+
+    let tracker = get_prediction_tracker()?;
+    tracker.evaluate_predictions(ticker, &current_prices)
+}
+
+/// Prediction accuracy tool handler.
+async fn tool_prediction_accuracy(input: &serde_json::Value) -> Result<String, String> {
+    let period_days = input["period_days"].as_i64();
+
+    let tracker = get_prediction_tracker()?;
+    tracker.calculate_accuracy(period_days)
+}
+
+/// Prediction list tool handler.
+async fn tool_prediction_list(input: &serde_json::Value) -> Result<String, String> {
+    let status = input["status"].as_str();
+    let limit = input["limit"].as_i64();
+
+    let tracker = get_prediction_tracker()?;
+    let predictions = tracker.list_predictions(status, limit)?;
+
+    if predictions.is_empty() {
+        return Ok("No predictions found.".to_string());
+    }
+
+    let mut output = format!("Predictions ({} total):\n\n", predictions.len());
+    for pred in &predictions {
+        output.push_str(&format!(
+            "ID: {} | {} | {} | ${:.2} → ${:.2} | {:.1}% confidence | {} days | Status: {}\n",
+            pred.id, pred.ticker, pred.direction, pred.entry_price, pred.target_price,
+            pred.confidence, pred.timeframe_days, pred.status
+        ));
+        if let Some(ref reasoning) = pred.reasoning {
+            output.push_str(&format!("  Reasoning: {}\n", reasoning));
+        }
+        if let Some(actual) = pred.actual_price {
+            output.push_str(&format!("  Actual price: ${:.2}", actual));
+            if let Some(score) = pred.accuracy_score {
+                output.push_str(&format!(" | Accuracy score: {:.1}%", score));
+            }
+            output.push('\n');
+        }
+        output.push('\n');
+    }
+
+    Ok(output)
+}
+
+// ---------------------------------------------------------------------------
+// Self-learning tools
+// ---------------------------------------------------------------------------
+
+/// Get or create the self-learning instance.
+fn get_self_learning() -> Result<crate::self_learning::SelfLearning, String> {
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+
+    static LEARNING: OnceLock<Mutex<Option<crate::self_learning::SelfLearning>>> = OnceLock::new();
+
+    let mutex = LEARNING.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex.lock().map_err(|e| format!("Lock error: {e}"))?;
+
+    if guard.is_none() {
+        // Determine database path
+        let db_path = if let Ok(home) = std::env::var("HOME") {
+            std::path::PathBuf::from(home).join(".openfang").join("learning.db")
+        } else if let Ok(userprofile) = std::env::var("USERPROFILE") {
+            std::path::PathBuf::from(userprofile).join(".openfang").join("learning.db")
+        } else {
+            return Err("Cannot determine home directory for learning database".to_string());
+        };
+
+        // Create parent directory if needed
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create .openfang directory: {e}"))?;
+        }
+
+        let learning = crate::self_learning::SelfLearning::open(&db_path)?;
+        *guard = Some(learning);
+    }
+
+    guard.as_ref().cloned().ok_or_else(|| "Learning not initialized".to_string())
+}
+
+/// Learning generate report tool handler.
+async fn tool_learning_generate_report(input: &serde_json::Value) -> Result<String, String> {
+    let period_days = input["period_days"].as_i64().unwrap_or(7);
+
+    // Get predictions from the tracker
+    let tracker = get_prediction_tracker()?;
+    let predictions = tracker.list_predictions(None, Some(1000))?;
+
+    // Generate the report
+    let learning = get_self_learning()?;
+    let report_id = learning.generate_report(period_days, &predictions)?;
+
+    // Get the report to display
+    let report = learning.get_latest_report()?
+        .ok_or("Failed to retrieve generated report")?;
+
+    let mut output = format!(
+        "Weekly Self-Learning Report (ID: {})\n\n",
+        report_id
+    );
+    output.push_str(&format!("Period: {} to {}\n", report.period_start, report.period_end));
+    output.push_str(&format!("Total Predictions: {}\n", report.total_predictions));
+    output.push_str(&format!("Correct Predictions: {}\n", report.correct_predictions));
+    output.push_str(&format!("Accuracy: {:.1}%\n\n", report.accuracy_pct));
+
+    if let Some(best) = &report.best_strategy {
+        output.push_str(&format!("Best Strategy: {}\n", best));
+    }
+    if let Some(worst) = &report.worst_strategy {
+        output.push_str(&format!("Worst Strategy: {}\n", worst));
+    }
+
+    output.push_str("\nKey Insights:\n");
+    for (i, insight) in report.key_insights.iter().enumerate() {
+        output.push_str(&format!("{}. {}\n", i + 1, insight));
+    }
+
+    Ok(output)
+}
+
+/// Learning get insights tool handler.
+async fn tool_learning_get_insights(input: &serde_json::Value) -> Result<String, String> {
+    let strategy = input["strategy"].as_str();
+
+    let learning = get_self_learning()?;
+    let insights = learning.get_insights(strategy)?;
+
+    if insights.is_empty() {
+        return Ok("No insights found.".to_string());
+    }
+
+    let mut output = format!("Learning Insights ({} total):\n\n", insights.len());
+    for insight in &insights {
+        output.push_str(&format!(
+            "ID: {} | Category: {} | Confidence: {:.1}%\n",
+            insight.id,
+            insight.category,
+            insight.confidence.unwrap_or(0.0)
+        ));
+        output.push_str(&format!("  {}\n", insight.insight));
+        output.push_str(&format!("  Created: {}\n\n", insight.created_at));
+    }
+
+    Ok(output)
+}
+
+/// Learning update strategy tool handler.
+async fn tool_learning_update_strategy(input: &serde_json::Value) -> Result<String, String> {
+    let strategy = input["strategy"].as_str().ok_or("Missing 'strategy' parameter")?;
+    let adjustment = input["adjustment"].as_str().ok_or("Missing 'adjustment' parameter")?;
+    let reason = input["reason"].as_str().map(|s| s.to_string());
+    let before_accuracy = input["before_accuracy"].as_f64();
+
+    let learning = get_self_learning()?;
+    let id = learning.update_strategy(strategy, adjustment, reason, before_accuracy)?;
+
+    Ok(format!(
+        "Strategy adjustment recorded (ID: {})\nStrategy: {}\nAdjustment: {}",
+        id, strategy, adjustment
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Confidence gate tools
+// ---------------------------------------------------------------------------
+
+/// Get or create the confidence gate instance.
+fn get_confidence_gate() -> Result<crate::confidence_gate::ConfidenceGate, String> {
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+
+    static GATE: OnceLock<Mutex<Option<crate::confidence_gate::ConfidenceGate>>> = OnceLock::new();
+
+    let mutex = GATE.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex.lock().map_err(|e| format!("Lock error: {e}"))?;
+
+    if guard.is_none() {
+        let home_dir = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map(|h| PathBuf::from(h).join(".openfang"))
+            .unwrap_or_else(|_| std::env::temp_dir().join(".openfang"));
+
+        let db_path = home_dir.join("confidence_gate.db");
+
+        // Ensure directory exists
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create .openfang directory: {e}"))?;
+        }
+
+        let gate = crate::confidence_gate::ConfidenceGate::open(&db_path)?;
+        *guard = Some(gate);
+    }
+
+    guard.as_ref().cloned().ok_or_else(|| "Gate not initialized".to_string())
+}
+
+/// Gate status tool handler.
+async fn tool_gate_status() -> Result<String, String> {
+    let gate = get_confidence_gate()?;
+
+    // Get database paths
+    let home_dir = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(|h| PathBuf::from(h).join(".openfang"))
+        .unwrap_or_else(|_| std::env::temp_dir().join(".openfang"));
+
+    let predictions_db = home_dir.join("predictions.db");
+    let paper_trading_db = home_dir.join("paper_trading.db");
+
+    let gates = gate.calculate_gate_status(&predictions_db, &paper_trading_db)?;
+
+    let mut output = "Confidence Gate Status\n\n".to_string();
+
+    for g in &gates {
+        let status = if g.met { "✅" } else { "❌" };
+        output.push_str(&format!(
+            "{} {} - {:.2} (threshold: {:.2})\n   {}\n\n",
+            status, g.name, g.current_value, g.threshold, g.description
+        ));
+    }
+
+    let all_met = gates.iter().all(|g| g.met);
+    if all_met {
+        output.push_str("🎉 All gates are met! You can request live trading approval.\n");
+    } else {
+        output.push_str("⚠️  Not all gates are met. Continue paper trading to improve metrics.\n");
+    }
+
+    Ok(output)
+}
+
+/// Gate history tool handler.
+async fn tool_gate_history(input: &serde_json::Value) -> Result<String, String> {
+    let days = input["days"].as_i64();
+
+    let gate = get_confidence_gate()?;
+    let history = gate.get_gate_history(days)?;
+
+    if history.is_empty() {
+        return Ok("No gate history found.".to_string());
+    }
+
+    let mut output = format!("Gate History ({} snapshots):\n\n", history.len());
+    for snapshot in &history {
+        output.push_str(&format!(
+            "{} | Accuracy: {:.1}% | Drawdown: {:.1}% | Sharpe: {:.2} | Days: {} | All Met: {} | Approved: {}\n",
+            snapshot.created_at,
+            snapshot.accuracy_pct,
+            snapshot.max_drawdown_pct,
+            snapshot.sharpe_ratio,
+            snapshot.days_of_data,
+            if snapshot.all_gates_met { "✅" } else { "❌" },
+            if snapshot.human_approved { "✅" } else { "❌" }
+        ));
+    }
+
+    Ok(output)
+}
+
+/// Gate request live tool handler.
+async fn tool_gate_request_live() -> Result<String, String> {
+    let gate = get_confidence_gate()?;
+
+    // Get database paths
+    let home_dir = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(|h| PathBuf::from(h).join(".openfang"))
+        .unwrap_or_else(|_| std::env::temp_dir().join(".openfang"));
+
+    let predictions_db = home_dir.join("predictions.db");
+    let paper_trading_db = home_dir.join("paper_trading.db");
+
+    let gates = gate.calculate_gate_status(&predictions_db, &paper_trading_db)?;
+    gate.request_live(&gates)
+}
+
+/// Gate approve live tool handler.
+async fn tool_gate_approve_live(input: &serde_json::Value) -> Result<String, String> {
+    let confirmation_code = input["confirmation_code"].as_str()
+        .ok_or("Missing 'confirmation_code' parameter")?;
+    let approved_by = input["approved_by"].as_str().unwrap_or("user");
+
+    let gate = get_confidence_gate()?;
+    gate.approve_live(confirmation_code, approved_by)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3984,5 +4670,56 @@ mod tests {
         assert_eq!(output["title"], "Test");
         // Cleanup
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // --- Paper trading tests ---
+    #[tokio::test]
+    async fn test_paper_trade_buy() {
+        let input = serde_json::json!({
+            "ticker": "AAPL",
+            "shares": 10,
+            "price": 150.0,
+            "reason": "Test buy"
+        });
+        let result = tool_paper_trade_buy(&input).await;
+        assert!(result.is_ok(), "Buy should succeed: {:?}", result);
+        let output = result.unwrap();
+        assert!(output.contains("Bought"));
+        assert!(output.contains("AAPL"));
+    }
+
+    #[tokio::test]
+    async fn test_paper_trade_sell() {
+        // First buy some shares
+        let buy_input = serde_json::json!({
+            "ticker": "TSLA",
+            "shares": 5,
+            "price": 200.0
+        });
+        let _ = tool_paper_trade_buy(&buy_input).await;
+
+        // Then sell them
+        let sell_input = serde_json::json!({
+            "ticker": "TSLA",
+            "shares": 3,
+            "price": 210.0,
+            "reason": "Test sell"
+        });
+        let result = tool_paper_trade_sell(&sell_input).await;
+        assert!(result.is_ok(), "Sell should succeed: {:?}", result);
+        let output = result.unwrap();
+        assert!(output.contains("Sold"));
+        assert!(output.contains("TSLA"));
+        assert!(output.contains("P&L"));
+    }
+
+    #[tokio::test]
+    async fn test_portfolio_status() {
+        let result = tool_portfolio_status().await;
+        assert!(result.is_ok(), "Portfolio status should succeed: {:?}", result);
+        let output = result.unwrap();
+        assert!(output.contains("Paper Trading Portfolio"));
+        assert!(output.contains("Cash Balance"));
+        assert!(output.contains("Total Value"));
     }
 }

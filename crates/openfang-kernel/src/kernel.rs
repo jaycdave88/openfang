@@ -977,6 +977,59 @@ impl OpenFangKernel {
             }));
         }
 
+        // Initialize trading databases early (predictions.db, learning.db, paper_trading.db)
+        // This ensures they exist before any tools try to use them.
+        {
+            use std::path::PathBuf;
+
+            let home_dir = if let Ok(home) = std::env::var("OPENFANG_HOME") {
+                PathBuf::from(home)
+            } else {
+                std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .map(|h| PathBuf::from(h).join(".openfang"))
+                    .unwrap_or_else(|_| std::env::temp_dir().join(".openfang"))
+            };
+
+            // Ensure .openfang directory exists
+            if let Err(e) = std::fs::create_dir_all(&home_dir) {
+                warn!("Failed to create .openfang directory: {e}");
+            }
+
+            // Initialize PredictionTracker
+            let predictions_db = home_dir.join("predictions.db");
+            match openfang_runtime::prediction_tracker::PredictionTracker::open(&predictions_db) {
+                Ok(_) => {
+                    info!("Prediction tracker initialized at {}", predictions_db.display());
+                }
+                Err(e) => {
+                    warn!("Failed to initialize prediction tracker: {e}");
+                }
+            }
+
+            // Initialize SelfLearning
+            let learning_db = home_dir.join("learning.db");
+            match openfang_runtime::self_learning::SelfLearning::open(&learning_db) {
+                Ok(_) => {
+                    info!("Self-learning engine initialized at {}", learning_db.display());
+                }
+                Err(e) => {
+                    warn!("Failed to initialize self-learning engine: {e}");
+                }
+            }
+
+            // Initialize PaperTradingEngine (defensive - should already exist)
+            let paper_trading_db = home_dir.join("paper_trading.db");
+            match openfang_runtime::paper_trading::PaperTradingEngine::open(&paper_trading_db) {
+                Ok(_) => {
+                    info!("Paper trading engine initialized at {}", paper_trading_db.display());
+                }
+                Err(e) => {
+                    warn!("Failed to initialize paper trading engine: {e}");
+                }
+            }
+        }
+
         // Initialize cron scheduler
         let cron_scheduler =
             crate::cron::CronScheduler::new(&config.home_dir, config.max_cron_jobs);

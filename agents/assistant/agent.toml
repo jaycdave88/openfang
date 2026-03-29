@@ -77,5 +77,26 @@ memory_write = ["self.*", "shared.*"]
 agent_message = ["*"]
 shell = ["python *", "cargo *", "git *", "npm *"]
 
+[routing]
+dynamic_tool_selection = true
+tool_selector_model = "qwen3.5:4b"
+simple_model = "qwen3.5:4b"
+medium_model = "default"
+complex_model = "default"
+simple_threshold = 200
+complex_threshold = 800
+
+[routing.tool_groups]
+greeting = []
+os_control = ["mcp_macos_*"]
+research = ["web_search", "web_fetch", "knowledge_*", "memory_*", "a2a_send"]
+trading = ["a2a_send", "web_search", "memory_*", "knowledge_*"]
+scheduling = ["schedule_*", "cron_*", "memory_store", "channel_send"]
+coding = ["file_*", "shell_exec", "apply_patch", "process_*", "mcp_sshbox_*"]
+browser = ["browser_*"]
+media = ["image_*", "media_*", "text_to_speech", "speech_to_text"]
+agent_management = ["agent_*", "hand_*", "task_*"]
+general = ["memory_*", "web_search", "web_fetch", "knowledge_*", "channel_send"]
+
 [autonomous]
 max_iterations = 100

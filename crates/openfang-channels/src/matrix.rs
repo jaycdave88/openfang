@@ -82,6 +82,84 @@ impl MatrixAdapter {
         self
     }
 
+    /// Look up room members for an `@imessage_<phone>:…` ghost user and, if
+    /// found, send the message directly via macOS Messages.app (AppleScript).
+    /// This bypasses the Matrix→bridge path which doesn't work because Conduit
+    /// does not push appservice-originated events back to the appservice.
+    async fn try_send_imessage_direct(&self, room_id: &str, text: &str) {
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{}/joined_members",
+            self.homeserver_url, room_id
+        );
+        let resp = match self
+            .client
+            .get(&url)
+            .bearer_auth(self.access_token.as_str())
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("iMessage direct: failed to fetch room members: {e}");
+                return;
+            }
+        };
+        if !resp.status().is_success() {
+            return;
+        }
+        let body: serde_json::Value = match resp.json().await {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        let joined = match body["joined"].as_object() {
+            Some(j) => j,
+            None => return,
+        };
+
+        for member_id in joined.keys() {
+            // Ghost users created by mautrix-imessage look like
+            // @imessage_16304006795:momo.local
+            if !member_id.starts_with("@imessage_") {
+                continue;
+            }
+            let phone = match member_id
+                .trim_start_matches("@imessage_")
+                .split(':')
+                .next()
+            {
+                Some(p) if !p.is_empty() => format!("+{p}"),
+                _ => continue,
+            };
+
+            let plain = crate::formatter::markdown_to_imessage_plain(text);
+            let escaped = plain.replace('\\', "\\\\").replace('"', "\\\"");
+            let script = format!(
+                "tell application \"Messages\" to send \"{escaped}\" to buddy \"{phone}\" of (1st account whose service type = iMessage)"
+            );
+            match tokio::process::Command::new("osascript")
+                .arg("-e")
+                .arg(&script)
+                .output()
+                .await
+            {
+                Ok(o) if o.status.success() => {
+                    info!("Sent iMessage directly to {phone}");
+                }
+                Ok(o) => {
+                    warn!(
+                        "AppleScript iMessage failed: {}",
+                        String::from_utf8_lossy(&o.stderr)
+                    );
+                }
+                Err(e) => {
+                    warn!("Failed to exec osascript: {e}");
+                }
+            }
+            // Only send to the first iMessage ghost found in the room.
+            break;
+        }
+    }
+
     /// Get the token and optional `?user_id=` query suffix for sending.
     /// Returns (token, url_suffix).
     fn send_auth(&self) -> (&str, String) {
@@ -259,6 +337,7 @@ impl ChannelAdapter for MatrixAdapter {
         let since_token = Arc::clone(&self.since_token);
         let mut shutdown_rx = self.shutdown_rx.clone();
         let auto_accept = self.auto_accept_invites;
+        let appservice_user_id = self.appservice_user_id.clone();
 
         // FIX #4: Do an initial sync to get the since token, skipping old messages.
         if since_token.read().await.is_none() {
@@ -356,8 +435,14 @@ impl ChannelAdapter for MatrixAdapter {
                                 }
 
                                 let sender = event["sender"].as_str().unwrap_or("");
+                                // Skip messages from our own user AND from the appservice bot
                                 if sender == user_id {
-                                    continue; // Skip own messages
+                                    continue;
+                                }
+                                if let Some(ref app_user) = appservice_user_id {
+                                    if sender == app_user.as_str() {
+                                        continue;
+                                    }
                                 }
 
                                 let content = event["content"]["body"].as_str().unwrap_or("");
@@ -446,6 +531,11 @@ impl ChannelAdapter for MatrixAdapter {
         user: &ChannelUser,
         content: ChannelContent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let plain_text = match &content {
+            ChannelContent::Text(t) => Some(t.clone()),
+            _ => None,
+        };
+
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
@@ -455,6 +545,15 @@ impl ChannelAdapter for MatrixAdapter {
                     .await?;
             }
         }
+
+        // After sending to Matrix, also deliver directly via iMessage if this
+        // is a bridged iMessage room. This is needed because Conduit does not
+        // push appservice-originated events back to the bridge.
+        if let Some(text) = plain_text {
+            self.try_send_imessage_direct(&user.platform_id, &text)
+                .await;
+        }
+
         Ok(())
     }
 

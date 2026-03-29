@@ -68,10 +68,26 @@ pub struct KernelBridgeAdapter {
 
 #[async_trait]
 impl ChannelBridgeHandle for KernelBridgeAdapter {
-    async fn send_message(&self, agent_id: AgentId, message: &str) -> Result<String, String> {
+    async fn send_message(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender_id: Option<&str>,
+        sender_name: Option<&str>,
+    ) -> Result<String, String> {
+        // Convert Option<&str> to Option<String> for the kernel API
+        let sender_id_owned = sender_id.map(|s| s.to_string());
+        let sender_name_owned = sender_name.map(|s| s.to_string());
+
         let result = self
             .kernel
-            .send_message(agent_id, message)
+            .send_message_with_handle(
+                agent_id,
+                message,
+                None, // No kernel handle for channel messages
+                sender_id_owned,
+                sender_name_owned,
+            )
             .await
             .map_err(|e| format!("{e}"))?;
         // Silent/NO_REPLY responses should not be forwarded to channels
@@ -85,6 +101,8 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         &self,
         agent_id: AgentId,
         blocks: Vec<openfang_types::message::ContentBlock>,
+        sender_id: Option<&str>,
+        sender_name: Option<&str>,
     ) -> Result<String, String> {
         // Extract text for the message parameter (used for memory recall / logging)
         let text: String = blocks
@@ -100,9 +118,21 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         } else {
             text
         };
+
+        // Convert Option<&str> to Option<String> for the kernel API
+        let sender_id_owned = sender_id.map(|s| s.to_string());
+        let sender_name_owned = sender_name.map(|s| s.to_string());
+
         let result = self
             .kernel
-            .send_message_with_blocks(agent_id, &text, blocks)
+            .send_message_with_handle_and_blocks(
+                agent_id,
+                &text,
+                None, // No kernel handle for channel messages
+                Some(blocks),
+                sender_id_owned,
+                sender_name_owned,
+            )
             .await
             .map_err(|e| format!("{e}"))?;
         Ok(result.response)

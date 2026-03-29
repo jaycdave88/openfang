@@ -530,6 +530,7 @@ async fn parse_discord_message(
     };
 
     let mut metadata = HashMap::new();
+    metadata.insert("sender_user_id".to_string(), serde_json::json!(author_id));
     if was_mentioned {
         metadata.insert("was_mentioned".to_string(), serde_json::json!(true));
     }

@@ -2,15 +2,16 @@
 # Pre-load Ollama models for OpenFang
 # Run after Ollama starts to ensure fallback models are ready
 #
-# This script ensures that both the primary 70B model and the fallback 32B model
+# This script ensures that the primary 32B coder model and fallback models
 # are loaded into VRAM simultaneously, preventing "404 model not found" errors
-# when OpenFang tries to use fallback models after malformed XML tool calls.
+# when OpenFang needs to use fallback models.
 #
 # The Mac Studio M3 Ultra has 256GB unified memory, which is plenty for:
-# - llama3.1:70b-instruct-q4_K_M (~102GB VRAM)
-# - qwen2.5-coder:32b-instruct-q4_K_M (~31GB VRAM)
+# - qwen2.5-coder:32b-instruct-q4_K_M (~31GB VRAM) [PRIMARY]
+# - qwen3.5:9b (~10GB VRAM) [FALLBACK 1]
+# - llama3.1:70b-instruct-q4_K_M (~102GB VRAM) [FALLBACK 2]
 # - nomic-embed-text (~0.6GB VRAM)
-# Total: ~134GB / 256GB
+# Total: ~144GB / 256GB
 
 echo 'Pre-loading Ollama models...'
 
@@ -24,18 +25,25 @@ for i in {1..30}; do
     sleep 2
 done
 
-# Load primary model (70B)
-echo 'Loading primary model: llama3.1:70b-instruct-q4_K_M...'
+# Load primary model (32B coder) with infinite keep_alive (-1 = never unload)
+echo 'Loading primary model: qwen2.5-coder:32b-instruct-q4_K_M...'
 curl -s -X POST http://localhost:11434/api/generate \
-    -d '{"model":"llama3.1:70b-instruct-q4_K_M","prompt":"","keep_alive":"24h"}' > /dev/null 2>&1
+    -d '{"model":"qwen2.5-coder:32b-instruct-q4_K_M","prompt":"","keep_alive":-1}' > /dev/null 2>&1
 
 # Wait a bit for the first model to start loading
 sleep 5
 
-# Load fallback model (32B)
-echo 'Loading fallback model: qwen2.5-coder:32b-instruct-q4_K_M...'
+# Load fallback model (9B) with infinite keep_alive
+echo 'Loading fallback model: qwen3.5:9b...'
 curl -s -X POST http://localhost:11434/api/generate \
-    -d '{"model":"qwen2.5-coder:32b-instruct-q4_K_M","prompt":"","keep_alive":"24h"}' > /dev/null 2>&1
+    -d '{"model":"qwen3.5:9b","prompt":"","keep_alive":-1}' > /dev/null 2>&1
+
+sleep 5
+
+# Load fallback model (70B) with infinite keep_alive
+echo 'Loading fallback model: llama3.1:70b-instruct-q4_K_M...'
+curl -s -X POST http://localhost:11434/api/generate \
+    -d '{"model":"llama3.1:70b-instruct-q4_K_M","prompt":"","keep_alive":-1}' > /dev/null 2>&1
 
 # Wait for models to finish loading
 sleep 10

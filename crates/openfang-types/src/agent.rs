@@ -52,6 +52,55 @@ pub struct ModelRoutingConfig {
     pub simple_threshold: u32,
     /// Token count threshold: above this = complex.
     pub complex_threshold: u32,
+    /// Enable two-stage dynamic tool selection (Stage 1: classify → Stage 2: filtered tools).
+    #[serde(default)]
+    pub dynamic_tool_selection: bool,
+    /// Model to use for the tool-selection classification step (should be fast, e.g. "qwen3.5:4b").
+    #[serde(default = "default_tool_selector_model")]
+    pub tool_selector_model: String,
+    /// Category → tool name patterns mapping for dynamic tool selection.
+    /// Patterns support trailing wildcard (`mcp_macos_*` matches `mcp_macos_open_app`).
+    #[serde(default = "default_tool_groups")]
+    pub tool_groups: HashMap<String, Vec<String>>,
+}
+
+fn default_tool_selector_model() -> String {
+    "qwen3.5:4b".to_string()
+}
+
+/// Default tool group mapping — categories to tool name patterns.
+pub fn default_tool_groups() -> HashMap<String, Vec<String>> {
+    let mut m = HashMap::new();
+    m.insert("greeting".into(), vec![]);
+    m.insert("os_control".into(), vec!["mcp_macos_*".into()]);
+    m.insert("research".into(), vec![
+        "web_search".into(), "web_fetch".into(), "knowledge_*".into(),
+        "memory_*".into(), "a2a_send".into(), "a2a_discover".into(), "channel_send".into(),
+    ]);
+    m.insert("trading".into(), vec![
+        "a2a_send".into(), "a2a_discover".into(), "web_search".into(), "web_fetch".into(),
+        "memory_*".into(), "knowledge_*".into(), "channel_send".into(),
+        "paper_trade_*".into(), "portfolio_status".into(), "trade_history".into(),
+    ]);
+    m.insert("scheduling".into(), vec![
+        "schedule_*".into(), "cron_*".into(), "memory_store".into(), "channel_send".into(),
+    ]);
+    m.insert("coding".into(), vec![
+        "file_*".into(), "shell_exec".into(), "apply_patch".into(),
+        "process_*".into(), "mcp_sshbox_*".into(), "mcp_intent_*".into(),
+    ]);
+    m.insert("browser".into(), vec!["browser_*".into()]);
+    m.insert("media".into(), vec![
+        "image_*".into(), "media_*".into(), "text_to_speech".into(), "speech_to_text".into(),
+    ]);
+    m.insert("agent_management".into(), vec![
+        "agent_*".into(), "hand_*".into(), "task_*".into(),
+    ]);
+    m.insert("general".into(), vec![
+        "memory_*".into(), "web_search".into(), "web_fetch".into(),
+        "knowledge_*".into(), "channel_send".into(), "mcp_intent_*".into(),
+    ]);
+    m
 }
 
 impl Default for ModelRoutingConfig {
@@ -62,6 +111,9 @@ impl Default for ModelRoutingConfig {
             complex_model: "claude-sonnet-4-20250514".to_string(),
             simple_threshold: 100,
             complex_threshold: 500,
+            dynamic_tool_selection: false,
+            tool_selector_model: default_tool_selector_model(),
+            tool_groups: default_tool_groups(),
         }
     }
 }
