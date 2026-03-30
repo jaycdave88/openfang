@@ -328,6 +328,121 @@ impl ToolSelector {
             .cloned()
             .collect()
     }
+
+    /// Classify message into categories using simple keyword matching (no LLM call).
+    ///
+    /// This is a fast, zero-cost alternative to the LLM-based classification.
+    /// Returns relevant categories based on keywords found in the message.
+    ///
+    /// Categories:
+    /// - `trading`: trading, stock, market, buy, sell, portfolio, etc.
+    /// - `personal`: expense, receipt, email, calendar, gmail, etc.
+    /// - `coding`: code, bug, deploy, file, rust, python, etc.
+    /// - `os_control`: open, close, click, screenshot, macos, etc.
+    /// - `research`: search, web, fetch, knowledge, etc.
+    /// - `browser`: browser, navigate, screenshot, etc.
+    /// - `media`: image, audio, video, tts, stt, etc.
+    /// - `agent_management`: agent, spawn, task, hand, etc.
+    /// - `scheduling`: schedule, cron, reminder, etc.
+    /// - `general`: fallback when no specific category matches
+    pub fn classify_message_by_keywords(message: &str) -> Vec<String> {
+        let msg_lower = message.to_lowercase();
+        let mut categories = Vec::new();
+
+        // Trading keywords
+        let trading_keywords = [
+            "trade", "trading", "stock", "buy", "sell", "portfolio", "market",
+            "prediction", "paper_trade", "price", "ticker", "nvda", "aapl",
+            "spy", "qqq", "crypto", "bitcoin", "eth", "investment", "position",
+            "gate", "learning", "backtest"
+        ];
+        if trading_keywords.iter().any(|k| msg_lower.contains(k)) {
+            categories.push("trading".to_string());
+        }
+
+        // Personal keywords
+        let personal_keywords = [
+            "expense", "receipt", "email", "gmail", "calendar", "order",
+            "restaurant", "booking", "appointment", "event", "meeting",
+            "schedule", "reminder"
+        ];
+        if personal_keywords.iter().any(|k| msg_lower.contains(k)) {
+            categories.push("personal".to_string());
+        }
+
+        // Coding keywords
+        let coding_keywords = [
+            "code", "coding", "bug", "deploy", "rust", "python", "javascript",
+            "file", "directory", "patch", "git", "commit", "build", "compile",
+            "test", "cargo", "npm", "intent", "function", "class", "debug",
+            "error", "exception", "refactor"
+        ];
+        if coding_keywords.iter().any(|k| msg_lower.contains(k)) {
+            categories.push("coding".to_string());
+        }
+
+        // OS control keywords
+        let os_keywords = [
+            "open app", "close app", "click", "screenshot", "macos", "window",
+            "minimize", "maximize", "finder", "safari", "chrome", "terminal"
+        ];
+        if os_keywords.iter().any(|k| msg_lower.contains(k)) {
+            categories.push("os_control".to_string());
+        }
+
+        // Research keywords
+        let research_keywords = [
+            "search", "web", "fetch", "knowledge", "lookup", "find", "google",
+            "research", "article", "wikipedia", "documentation", "docs"
+        ];
+        if research_keywords.iter().any(|k| msg_lower.contains(k)) {
+            categories.push("research".to_string());
+        }
+
+        // Browser keywords
+        let browser_keywords = [
+            "browser", "navigate", "url", "webpage", "website", "http",
+            "click button", "fill form", "scrape"
+        ];
+        if browser_keywords.iter().any(|k| msg_lower.contains(k)) {
+            categories.push("browser".to_string());
+        }
+
+        // Media keywords
+        let media_keywords = [
+            "image", "photo", "picture", "audio", "video", "media",
+            "tts", "text to speech", "speech to text", "stt", "speak",
+            "read aloud", "transcribe"
+        ];
+        if media_keywords.iter().any(|k| msg_lower.contains(k)) {
+            categories.push("media".to_string());
+        }
+
+        // Agent management keywords
+        let agent_keywords = [
+            "agent", "spawn", "task", "delegate", "hand", "supervisor",
+            "create agent", "kill agent", "list agents"
+        ];
+        if agent_keywords.iter().any(|k| msg_lower.contains(k)) {
+            categories.push("agent_management".to_string());
+        }
+
+        // Scheduling keywords (different from personal calendar)
+        let scheduling_keywords = [
+            "cron", "scheduled task", "recurring", "every day", "every hour",
+            "background job", "periodic"
+        ];
+        if scheduling_keywords.iter().any(|k| msg_lower.contains(k)) {
+            categories.push("scheduling".to_string());
+        }
+
+        // If no specific category matched, use general
+        if categories.is_empty() {
+            categories.push("general".to_string());
+        }
+
+        categories
+    }
 }
 
 /// Check if a pattern (possibly with trailing `*`) matches a tool name.
@@ -695,5 +810,65 @@ mod tests {
                 cat
             );
         }
+    }
+
+    // ── Keyword classification tests ───────────────────────────────────
+
+    #[test]
+    fn test_classify_trading_message() {
+        let categories = ToolSelector::classify_message_by_keywords("buy 100 shares of NVDA");
+        assert!(categories.contains(&"trading".to_string()));
+    }
+
+    #[test]
+    fn test_classify_personal_message() {
+        let categories = ToolSelector::classify_message_by_keywords("check my email and calendar");
+        assert!(categories.contains(&"personal".to_string()));
+    }
+
+    #[test]
+    fn test_classify_coding_message() {
+        let categories = ToolSelector::classify_message_by_keywords("fix the bug in the rust code");
+        assert!(categories.contains(&"coding".to_string()));
+    }
+
+    #[test]
+    fn test_classify_research_message() {
+        let categories = ToolSelector::classify_message_by_keywords("search the web for information");
+        assert!(categories.contains(&"research".to_string()));
+    }
+
+    #[test]
+    fn test_classify_os_control_message() {
+        let categories = ToolSelector::classify_message_by_keywords("open app Safari");
+        assert!(categories.contains(&"os_control".to_string()));
+    }
+
+    #[test]
+    fn test_classify_browser_message() {
+        let categories = ToolSelector::classify_message_by_keywords("navigate to https://example.com");
+        assert!(categories.contains(&"browser".to_string()));
+    }
+
+    #[test]
+    fn test_classify_general_fallback() {
+        let categories = ToolSelector::classify_message_by_keywords("hello how are you");
+        assert_eq!(categories, vec!["general"]);
+    }
+
+    #[test]
+    fn test_classify_multiple_categories() {
+        let categories = ToolSelector::classify_message_by_keywords(
+            "search for stock prices and check my email"
+        );
+        assert!(categories.contains(&"research".to_string()));
+        assert!(categories.contains(&"personal".to_string()));
+        assert!(categories.contains(&"trading".to_string()));
+    }
+
+    #[test]
+    fn test_classify_case_insensitive() {
+        let categories = ToolSelector::classify_message_by_keywords("BUY AAPL STOCK");
+        assert!(categories.contains(&"trading".to_string()));
     }
 }
