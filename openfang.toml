@@ -1,0 +1,24 @@
+# OpenFang Agent OS — Local Ollama Configuration
+# Points all LLM calls to local Ollama instance at localhost:11434
+
+[default_model]
+provider = "ollama"
+model = "qwen2.5-coder:32b-instruct-q4_K_M"
+base_url = "http://localhost:11434"
+
+# Fallback chain: primary (local qwen2.5-coder) → fallback (local qwen3.5) → cloud (Groq llama-3.3-70b)
+[[model_fallback]]
+provider = "ollama"
+model = "qwen3.5:9b"
+base_url = "http://localhost:11434"
+
+[[model_fallback]]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+
+[memory]
+decay_rate = 0.05
+
+[network]
+listen_addr = "127.0.0.1:4200"
+

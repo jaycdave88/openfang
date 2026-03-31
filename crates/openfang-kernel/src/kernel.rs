@@ -115,6 +115,8 @@ pub struct OpenFangKernel {
     /// Embedding driver for vector similarity search (None = text fallback).
     pub embedding_driver:
         Option<Arc<dyn openfang_runtime::embedding::EmbeddingDriver + Send + Sync>>,
+    /// Tool selector for embedding-based smart tool filtering (OnceLock for safe init after Arc creation).
+    pub tool_selector: OnceLock<Arc<openfang_runtime::tool_selector::ToolSelector>>,
     /// Hand registry — curated autonomous capability packages.
     pub hand_registry: openfang_hands::registry::HandRegistry,
     /// Credential resolver — vault → dotenv → env var priority chain.
@@ -1052,6 +1054,8 @@ impl OpenFangKernel {
         let initial_broadcast = config.broadcast.clone();
         let auto_reply_engine = crate::auto_reply::AutoReplyEngine::new(config.auto_reply.clone());
 
+        // Tool selector will be initialized after MCP tools are loaded in start_background_agents
+
         let kernel = Self {
             config,
             registry: AgentRegistry::new(),
@@ -1081,6 +1085,7 @@ impl OpenFangKernel {
             tts_engine,
             pairing,
             embedding_driver,
+            tool_selector: OnceLock::new(),
             hand_registry,
             credential_resolver: std::sync::Mutex::new(credential_resolver),
             extension_registry: std::sync::RwLock::new(extension_registry),
@@ -2041,6 +2046,7 @@ impl OpenFangKernel {
                 ctx_window,
                 Some(&kernel_clone.process_manager),
                 content_blocks,
+                kernel_clone.tool_selector.get().map(|s| s.as_ref()),
             )
             .await;
 
@@ -2386,7 +2392,34 @@ impl OpenFangKernel {
                     "Dynamic tool selection applied"
                 );
 
-                tools = filtered;
+                if filtered.is_empty() {
+                    // Fallback: when classification yields no matching tools,
+                    // use a hardcoded set of core tool names instead of ALL tools.
+                    const DEFAULT_CORE_TOOLS: &[&str] = &[
+                        "web_search", "web_fetch",
+                        "memory_store", "memory_query",
+                        "shell_exec",
+                        "a2a_send", "a2a_discover",
+                        "mcp_macos_calendar", "mcp_macos_reminder",
+                        "paper_trade_buy", "paper_trade_sell", "portfolio_status",
+                        "expense_log", "expense_summary",
+                        "channel_send",
+                    ];
+                    let fallback: Vec<_> = tools
+                        .iter()
+                        .filter(|t| DEFAULT_CORE_TOOLS.contains(&t.name.as_str()))
+                        .cloned()
+                        .collect();
+                    warn!(
+                        agent = %entry.name,
+                        categories = ?categories,
+                        fallback_count = fallback.len(),
+                        "Tool filter returned empty — using default core tools"
+                    );
+                    tools = fallback;
+                } else {
+                    tools = filtered;
+                }
             }
         }
 
@@ -2642,6 +2675,7 @@ impl OpenFangKernel {
             ctx_window,
             Some(&self.process_manager),
             content_blocks,
+            self.tool_selector.get().map(|s| s.as_ref()),
         )
         .await
         .map_err(KernelError::OpenFang)?;
@@ -4112,6 +4146,14 @@ impl OpenFangKernel {
             let kernel = Arc::clone(self);
             tokio::spawn(async move {
                 kernel.connect_mcp_servers().await;
+                // After MCP servers connect and tools are cached, initialize tool selector
+                kernel.initialize_tool_selector().await;
+            });
+        } else {
+            // No MCP servers, but we should still initialize tool selector with builtin tools
+            let kernel = Arc::clone(self);
+            tokio::spawn(async move {
+                kernel.initialize_tool_selector().await;
             });
         }
 
@@ -4870,6 +4912,92 @@ impl OpenFangKernel {
         }
 
         Ok(primary)
+    }
+
+    /// Initialize tool selector with embedding-based smart filtering.
+    ///
+    /// Should be called after MCP servers connect so all tools are available.
+    async fn initialize_tool_selector(self: &Arc<Self>) {
+        use openfang_runtime::tool_selector::{ToolSelector, ToolSelectorConfig};
+
+        // Check if tool selection is enabled in config
+        if !self.config.tool_selection.enabled {
+            info!("Tool selector disabled in config");
+            return;
+        }
+
+        // Gather all available tools (builtin + MCP + skills)
+        // Use a dummy agent ID to get all tools
+        let all_tools = builtin_tool_definitions();
+
+        // Add MCP tools
+        let mcp_tools_count = if let Ok(mcp_tools) = self.mcp_tools.lock() {
+            mcp_tools.len()
+        } else {
+            0
+        };
+
+        // Add skill tools
+        let skill_tools_count = {
+            let registry = self.skill_registry.read().unwrap_or_else(|e| e.into_inner());
+            registry.all_tool_definitions().len()
+        };
+
+        let total_tools = all_tools.len() + mcp_tools_count + skill_tools_count;
+        info!(
+            builtin = all_tools.len(),
+            mcp = mcp_tools_count,
+            skills = skill_tools_count,
+            total = total_tools,
+            "Initializing tool selector with {} total tools",
+            total_tools
+        );
+
+        // Build complete tool list for initialization
+        let mut complete_tools = all_tools;
+        if let Ok(mcp_tools) = self.mcp_tools.lock() {
+            complete_tools.extend(mcp_tools.iter().cloned());
+        }
+        {
+            let registry = self.skill_registry.read().unwrap_or_else(|e| e.into_inner());
+            for skill_tool in registry.all_tool_definitions() {
+                complete_tools.push(ToolDefinition {
+                    name: skill_tool.name.clone(),
+                    description: skill_tool.description.clone(),
+                    input_schema: skill_tool.input_schema.clone(),
+                });
+            }
+        }
+
+        // Create tool selector config from kernel config
+        let config = ToolSelectorConfig {
+            enabled: self.config.tool_selection.enabled,
+            embedding_model: self.config.tool_selection.embedding_model.clone(),
+            top_k: self.config.tool_selection.top_k,
+            always_include: self.config.tool_selection.always_include.clone(),
+        };
+
+        // Initialize tool selector
+        match ToolSelector::new(&complete_tools, config).await {
+            Ok(selector) => {
+                info!(
+                    tools = complete_tools.len(),
+                    model = %self.config.tool_selection.embedding_model,
+                    top_k = self.config.tool_selection.top_k,
+                    "Tool selector initialized successfully"
+                );
+                // Use OnceLock to set the value (safe because this is called only once during startup)
+                if self.tool_selector.set(Arc::new(selector)).is_err() {
+                    warn!("Tool selector already initialized");
+                }
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Failed to initialize tool selector — falling back to keyword-based selection"
+                );
+            }
+        }
     }
 
     /// Connect to all configured MCP servers and cache their tool definitions.

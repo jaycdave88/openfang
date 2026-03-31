@@ -151,15 +151,27 @@ impl PaperTradingEngine {
     }
 
     /// Execute a buy order.
-    pub fn buy(&self, ticker: &str, shares: i64, price: Option<f64>, reason: Option<String>) -> Result<String, String> {
+    pub async fn buy(&self, ticker: &str, shares: i64, price: Option<f64>, reason: Option<String>) -> Result<String, String> {
+        // Get current market price - fetch from Google Finance if not provided
+        let actual_price = match price {
+            Some(p) => p,
+            None => {
+                crate::stock_price::fetch_stock_price(ticker).await
+                    .map_err(|e| format!("Could not get price for {}: {}", ticker, e))?
+            }
+        };
+
+        // Delegate to sync implementation
+        self.buy_sync(ticker, shares, actual_price, reason)
+    }
+
+    /// Synchronous buy implementation (internal).
+    fn buy_sync(&self, ticker: &str, shares: i64, actual_price: f64, reason: Option<String>) -> Result<String, String> {
         if shares <= 0 {
             return Err("Shares must be positive".to_string());
         }
 
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-
-        // Get current market price (if not provided, use a placeholder)
-        let actual_price = price.unwrap_or(100.0); // In real impl, fetch from market data
         let cost = actual_price * shares as f64;
 
         // Check balance
@@ -260,7 +272,22 @@ impl PaperTradingEngine {
     }
 
     /// Execute a sell order.
-    pub fn sell(&self, ticker: &str, shares: i64, price: Option<f64>, reason: Option<String>) -> Result<String, String> {
+    pub async fn sell(&self, ticker: &str, shares: i64, price: Option<f64>, reason: Option<String>) -> Result<String, String> {
+        // Get current market price - fetch from Google Finance if not provided
+        let actual_price = match price {
+            Some(p) => p,
+            None => {
+                crate::stock_price::fetch_stock_price(ticker).await
+                    .map_err(|e| format!("Could not get price for {}: {}", ticker, e))?
+            }
+        };
+
+        // Delegate to sync implementation
+        self.sell_sync(ticker, shares, actual_price, reason)
+    }
+
+    /// Synchronous sell implementation (internal).
+    fn sell_sync(&self, ticker: &str, shares: i64, actual_price: f64, reason: Option<String>) -> Result<String, String> {
         if shares <= 0 {
             return Err("Shares must be positive".to_string());
         }
@@ -283,8 +310,6 @@ impl PaperTradingEngine {
             ));
         }
 
-        // Get current market price
-        let actual_price = price.unwrap_or(100.0); // In real impl, fetch from market data
         let proceeds = actual_price * shares as f64;
 
         // Record trade

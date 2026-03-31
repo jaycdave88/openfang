@@ -13,6 +13,7 @@ use crate::llm_errors;
 use crate::loop_guard::{LoopGuard, LoopGuardConfig, LoopGuardVerdict};
 use crate::mcp::McpConnection;
 use crate::tool_runner;
+use crate::tool_selector::ToolSelector;
 use crate::web_search::WebToolsContext;
 use openfang_memory::session::Session;
 use openfang_memory::MemorySubstrate;
@@ -100,6 +101,149 @@ pub fn strip_provider_prefix(model: &str, provider: &str) -> String {
 /// Default context window size (tokens) for token-based trimming.
 const DEFAULT_CONTEXT_WINDOW: usize = 200_000;
 
+/// Maximum tools to send to LLM per request (dynamic routing cap).
+const MAX_TOOLS_PER_REQUEST: usize = 30;
+
+/// Select tools relevant to the user message to reduce token load.
+///
+/// If a ToolSelector is provided, uses embedding-based semantic matching.
+/// Otherwise falls back to keyword-based classification.
+/// This reduces per-request token count from ~10,624 to ~500-2,000.
+async fn select_tools_for_message(
+    message: &str,
+    all_tools: &[ToolDefinition],
+    tool_selector: Option<&ToolSelector>,
+) -> Vec<ToolDefinition> {
+    // Try embedding-based selection first if tool_selector is provided
+    if let Some(selector) = tool_selector {
+        match selector.select_tools(message, all_tools).await {
+            Ok(selected) => {
+                info!(
+                    total = all_tools.len(),
+                    selected = selected.len(),
+                    "Embedding-based tool selection succeeded"
+                );
+                return selected;
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Embedding-based tool selection failed, falling back to keyword-based"
+                );
+                // Fall through to keyword-based selection
+            }
+        }
+    }
+
+    // Keyword-based selection (original implementation)
+    select_tools_keyword_based(message, all_tools)
+}
+
+/// Keyword-based tool selection (original implementation, now a fallback).
+fn select_tools_keyword_based(message: &str, all_tools: &[ToolDefinition]) -> Vec<ToolDefinition> {
+    let lower = message.to_lowercase();
+
+    // Core tools that are ALWAYS included (essential for basic operations)
+    let core_patterns = [
+        "web_search",
+        "memory_store",
+        "memory_query",
+        "memory_search",
+        "shell_exec",
+        "a2a_send",
+        "a2a_discover",
+        "channel_send",
+        "knowledge_query",
+        "knowledge_store",
+    ];
+
+    // Trading keywords and tool patterns
+    let trading_keywords = [
+        "buy", "sell", "trade", "portfolio", "stock", "market", "prediction",
+        "price", "ticker", "aapl", "nvda", "tsla", "btc", "eth", "crypto",
+        "forex", "option", "future", "equity", "bond", "dividend", "earnings",
+    ];
+    let trading_patterns = ["paper_trade_", "prediction_", "learning_", "gate_", "price_"];
+
+    // Personal assistant keywords and tool patterns
+    let personal_keywords = [
+        "receipt", "expense", "email", "gmail", "calendar", "order", "restaurant",
+        "schedule", "appointment", "meeting", "contact", "phone", "address",
+        "reminder", "event", "booking",
+    ];
+    let personal_patterns = ["expense_", "receipt_", "gmail_", "calendar_", "order_", "schedule_", "cron_"];
+
+    // Code/development keywords and tool patterns
+    let code_keywords = [
+        "code", "bug", "deploy", "intent", "github", "rust", "cargo", "build",
+        "test", "debug", "compile", "file", "directory", "patch", "commit",
+        "repository", "branch", "merge", "pull request", "issue",
+    ];
+    let code_patterns = ["intent_", "browser_", "file_", "apply_patch", "process_", "mcp_sshbox_"];
+
+    // General patterns (used when no specific category matches)
+    let general_patterns = ["mcp_macos_", "knowledge_", "web_fetch", "image_", "media_", "text_to_speech"];
+
+    // Detect which categories match
+    let is_trading = trading_keywords.iter().any(|kw| lower.contains(kw));
+    let is_personal = personal_keywords.iter().any(|kw| lower.contains(kw));
+    let is_code = code_keywords.iter().any(|kw| lower.contains(kw));
+
+    // Build the list of allowed patterns based on detected categories
+    let mut allowed_patterns: Vec<&str> = core_patterns.to_vec();
+
+    if is_trading {
+        allowed_patterns.extend(trading_patterns.iter());
+    }
+    if is_personal {
+        allowed_patterns.extend(personal_patterns.iter());
+    }
+    if is_code {
+        allowed_patterns.extend(code_patterns.iter());
+    }
+    // If no specific category matched, add general patterns
+    if !is_trading && !is_personal && !is_code {
+        allowed_patterns.extend(general_patterns.iter());
+    }
+
+    // Filter tools that match any of the allowed patterns
+    let mut selected: Vec<ToolDefinition> = all_tools
+        .iter()
+        .filter(|tool| {
+            allowed_patterns.iter().any(|pattern| {
+                tool.name == *pattern || tool.name.starts_with(pattern)
+            })
+        })
+        .cloned()
+        .collect();
+
+    // Cap at MAX_TOOLS_PER_REQUEST to prevent token overflow even with pattern matches
+    if selected.len() > MAX_TOOLS_PER_REQUEST {
+        info!(
+            original = all_tools.len(),
+            selected = selected.len(),
+            capped = MAX_TOOLS_PER_REQUEST,
+            "Tool selection exceeded cap, truncating to max"
+        );
+        selected.truncate(MAX_TOOLS_PER_REQUEST);
+    }
+
+    debug!(
+        total_available = all_tools.len(),
+        selected = selected.len(),
+        categories = format!(
+            "{}{}{}{}",
+            if is_trading { "trading " } else { "" },
+            if is_personal { "personal " } else { "" },
+            if is_code { "code " } else { "" },
+            if !is_trading && !is_personal && !is_code { "general" } else { "" }
+        ),
+        "Dynamic tool routing applied"
+    );
+
+    selected
+}
+
 /// Agent lifecycle phase within the execution loop.
 /// Used for UX indicators (typing, reactions) without coupling to channel types.
 #[derive(Debug, Clone, PartialEq)]
@@ -164,6 +308,7 @@ pub async fn run_agent_loop(
     context_window_tokens: Option<usize>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
     user_content_blocks: Option<Vec<ContentBlock>>,
+    tool_selector: Option<&ToolSelector>,
 ) -> OpenFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
@@ -363,13 +508,24 @@ pub async fn run_agent_loop(
         // Context guard: compact oversized tool results before LLM call
         apply_context_guard(&mut messages, &context_budget, available_tools);
 
+        // Dynamic tool routing: select only relevant tools for this message
+        // to reduce token load from ~10,624 to ~500-2,000 (embedding-based or keyword-based)
+        let selected_tools = if iteration == 0 {
+            // On first iteration, use the user message for classification
+            select_tools_for_message(user_message, available_tools, tool_selector).await
+        } else {
+            // On subsequent iterations, use all available tools since we're
+            // continuing an existing tool-use conversation
+            available_tools.to_vec()
+        };
+
         // Strip provider prefix: "openrouter/google/gemini-2.5-flash" → "google/gemini-2.5-flash"
         let api_model = strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
 
         let request = CompletionRequest {
             model: api_model,
             messages: messages.clone(),
-            tools: available_tools.to_vec(),
+            tools: selected_tools,
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
             system: Some(system_prompt.clone()),
@@ -1171,6 +1327,7 @@ pub async fn run_agent_loop_streaming(
     context_window_tokens: Option<usize>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
     user_content_blocks: Option<Vec<ContentBlock>>,
+    tool_selector: Option<&ToolSelector>,
 ) -> OpenFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
 
@@ -1374,13 +1531,24 @@ pub async fn run_agent_loop_streaming(
         // Context guard: compact oversized tool results before LLM call
         apply_context_guard(&mut messages, &context_budget, available_tools);
 
+        // Dynamic tool routing: select only relevant tools for this message
+        // to reduce token load from ~10,624 to ~500-2,000 (embedding-based or keyword-based)
+        let selected_tools = if iteration == 0 {
+            // On first iteration, use the user message for classification
+            select_tools_for_message(user_message, available_tools, tool_selector).await
+        } else {
+            // On subsequent iterations, use all available tools since we're
+            // continuing an existing tool-use conversation
+            available_tools.to_vec()
+        };
+
         // Strip provider prefix: "openrouter/google/gemini-2.5-flash" → "google/gemini-2.5-flash"
         let api_model = strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
 
         let request = CompletionRequest {
             model: api_model,
             messages: messages.clone(),
-            tools: available_tools.to_vec(),
+            tools: selected_tools,
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
             system: Some(system_prompt.clone()),
@@ -2952,6 +3120,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // tool_selector
         )
         .await
         .expect("Loop should complete without error");
@@ -3005,6 +3174,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // tool_selector
         )
         .await
         .expect("Loop should complete without error");
@@ -3060,6 +3230,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // tool_selector
         )
         .await
         .expect("Loop should complete without error");
@@ -3113,6 +3284,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // tool_selector
         )
         .await
         .expect("Loop should complete without error");
@@ -3159,6 +3331,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // tool_selector
         )
         .await
         .expect("Streaming loop should complete without error");
@@ -3283,6 +3456,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // tool_selector
         )
         .await
         .expect("Loop should recover via retry");
@@ -3330,6 +3504,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // tool_selector
         )
         .await
         .expect("Loop should complete with fallback");
@@ -3385,6 +3560,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // tool_selector
         )
         .await
         .expect("Streaming loop should complete without error");
@@ -4273,6 +4449,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // tool_selector
         )
         .await
         .expect("Agent loop should complete");
@@ -4340,6 +4517,7 @@ mod tests {
             None,
             None,
             None, // user_content_blocks
+            None, // tool_selector
         )
         .await
         .expect("Normal loop should complete");
@@ -4403,6 +4581,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // tool_selector
         )
         .await
         .expect("Streaming loop should complete");

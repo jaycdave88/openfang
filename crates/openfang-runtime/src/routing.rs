@@ -233,6 +233,7 @@ pub const KNOWN_CATEGORIES: &[&str] = &[
     "browser",
     "media",
     "agent_management",
+    "personal",
     "general",
 ];
 

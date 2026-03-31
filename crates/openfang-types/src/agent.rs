@@ -96,6 +96,10 @@ pub fn default_tool_groups() -> HashMap<String, Vec<String>> {
     m.insert("agent_management".into(), vec![
         "agent_*".into(), "hand_*".into(), "task_*".into(),
     ]);
+    m.insert("personal".into(), vec![
+        "expense_*".into(), "mcp_macos_calendar".into(), "mcp_macos_reminder".into(),
+        "memory_*".into(), "web_search".into(), "channel_send".into(),
+    ]);
     m.insert("general".into(), vec![
         "memory_*".into(), "web_search".into(), "web_fetch".into(),
         "knowledge_*".into(), "channel_send".into(), "mcp_intent_*".into(),

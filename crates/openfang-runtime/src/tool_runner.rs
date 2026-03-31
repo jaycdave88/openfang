@@ -454,6 +454,10 @@ pub async fn execute_tool(
         "portfolio_status" => tool_portfolio_status().await,
         "trade_history" => tool_trade_history(input).await,
 
+        // Stock price tools
+        "stock_price" => tool_stock_price(input).await,
+        "stock_prices" => tool_stock_prices(input).await,
+
         // Prediction tracker tools
         "prediction_log" => tool_prediction_log(input).await,
         "prediction_evaluate" => tool_prediction_evaluate(input).await,
@@ -1317,6 +1321,29 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 }
             }),
         },
+        // --- Stock price tools ---
+        ToolDefinition {
+            name: "stock_price".to_string(),
+            description: "Get real-time stock price from Google Finance. Returns current market price for a single ticker. Free, no API key required. Prices are cached for 5 minutes.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ticker": { "type": "string", "description": "Stock ticker symbol (e.g., 'AAPL', 'TSLA')" }
+                },
+                "required": ["ticker"]
+            }),
+        },
+        ToolDefinition {
+            name: "stock_prices".to_string(),
+            description: "Get real-time stock prices for multiple tickers from Google Finance. Fetches prices in parallel for efficiency. Returns a mapping of ticker → price. Free, no API key required. Prices are cached for 5 minutes.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tickers": { "type": "array", "items": { "type": "string" }, "description": "Array of stock ticker symbols (e.g., ['AAPL', 'MSFT', 'NVDA'])" }
+                },
+                "required": ["tickers"]
+            }),
+        },
         // --- Prediction tracker tools ---
         ToolDefinition {
             name: "prediction_log".to_string(),
@@ -1338,14 +1365,13 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "prediction_evaluate".to_string(),
-            description: "Evaluate open predictions against current market prices. Marks predictions as correct, incorrect, or expired based on actual price movements.".to_string(),
+            description: "Evaluate open predictions against current market prices. Marks predictions as correct, incorrect, or expired based on actual price movements. If current_prices is not provided, automatically fetches real-time prices from Google Finance for all tickers with open predictions.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "ticker": { "type": "string", "description": "Optional: evaluate only predictions for this ticker" },
-                    "current_prices": { "type": "object", "description": "Object with ticker: price pairs (e.g., {\"AAPL\": 150.25, \"TSLA\": 245.50})" }
-                },
-                "required": ["current_prices"]
+                    "current_prices": { "type": "object", "description": "Optional: object with ticker: price pairs (e.g., {\"AAPL\": 150.25, \"TSLA\": 245.50}). If not provided, prices are auto-fetched from Google Finance." }
+                }
             }),
         },
         ToolDefinition {
@@ -3505,7 +3531,7 @@ async fn tool_paper_trade_buy(input: &serde_json::Value) -> Result<String, Strin
     let reason = input["reason"].as_str().map(|s| s.to_string());
 
     let engine = get_paper_trading_engine()?;
-    engine.buy(ticker, shares, price, reason)
+    engine.buy(ticker, shares, price, reason).await
 }
 
 /// Paper trade sell tool handler.
@@ -3516,7 +3542,7 @@ async fn tool_paper_trade_sell(input: &serde_json::Value) -> Result<String, Stri
     let reason = input["reason"].as_str().map(|s| s.to_string());
 
     let engine = get_paper_trading_engine()?;
-    engine.sell(ticker, shares, price, reason)
+    engine.sell(ticker, shares, price, reason).await
 }
 
 /// Portfolio status tool handler.
@@ -3524,23 +3550,41 @@ async fn tool_portfolio_status() -> Result<String, String> {
     let engine = get_paper_trading_engine()?;
     let status = engine.get_account_status()?;
 
+    if status.positions.is_empty() {
+        return Ok(format!(
+            "Paper Trading Portfolio\n\nCash Balance: ${:.2}\nTotal Value: ${:.2}\n\nPositions:\n  (no positions)\n",
+            status.balance, status.total_value
+        ));
+    }
+
+    // Fetch current prices for all positions
+    let tickers: Vec<&str> = status.positions.iter().map(|p| p.ticker.as_str()).collect();
+    let current_prices = crate::stock_price::fetch_stock_prices(&tickers).await
+        .unwrap_or_default(); // Use cached prices if fetch fails
+
+    let mut total_position_value = 0.0;
     let mut output = format!(
-        "Paper Trading Portfolio\n\nCash Balance: ${:.2}\nTotal Value: ${:.2}\n\nPositions:\n",
-        status.balance, status.total_value
+        "Paper Trading Portfolio\n\nCash Balance: ${:.2}\n\nPositions:\n",
+        status.balance
     );
 
-    if status.positions.is_empty() {
-        output.push_str("  (no positions)\n");
-    } else {
-        for pos in &status.positions {
-            let pnl = pos.current_value - (pos.shares as f64 * pos.avg_cost);
-            let pnl_pct = (pnl / (pos.shares as f64 * pos.avg_cost)) * 100.0;
-            output.push_str(&format!(
-                "  {} - {} shares @ ${:.2} avg cost, current value: ${:.2} (P&L: ${:.2}, {:.2}%)\n",
-                pos.ticker, pos.shares, pos.avg_cost, pos.current_value, pnl, pnl_pct
-            ));
-        }
+    for pos in &status.positions {
+        let current_price = current_prices.get(&pos.ticker).copied().unwrap_or(pos.current_value / pos.shares as f64);
+        let current_value = current_price * pos.shares as f64;
+        let cost_basis = pos.avg_cost * pos.shares as f64;
+        let pnl = current_value - cost_basis;
+        let pnl_pct = (pnl / cost_basis) * 100.0;
+
+        total_position_value += current_value;
+
+        output.push_str(&format!(
+            "  {} - {} shares @ ${:.2} avg cost, current ${:.2}, value: ${:.2} (P&L: ${:+.2}, {:+.2}%)\n",
+            pos.ticker, pos.shares, pos.avg_cost, current_price, current_value, pnl, pnl_pct
+        ));
     }
+
+    let total_value = status.balance + total_position_value;
+    output.push_str(&format!("\nTotal Portfolio Value: ${:.2}\n", total_value));
 
     Ok(output)
 }
@@ -3566,6 +3610,42 @@ async fn tool_trade_history(input: &serde_json::Value) -> Result<String, String>
         if let Some(ref reason) = trade.reason {
             output.push_str(&format!("  Reason: {}\n", reason));
         }
+    }
+
+    Ok(output)
+}
+
+// ---------------------------------------------------------------------------
+// Stock price tools
+// ---------------------------------------------------------------------------
+
+/// Stock price tool handler - fetch real-time price for a single ticker.
+async fn tool_stock_price(input: &serde_json::Value) -> Result<String, String> {
+    let ticker = input["ticker"].as_str().ok_or("Missing 'ticker' parameter")?;
+
+    let price = crate::stock_price::fetch_stock_price(ticker).await?;
+
+    Ok(format!("{}: ${:.2}", ticker.to_uppercase(), price))
+}
+
+/// Stock prices tool handler - fetch real-time prices for multiple tickers.
+async fn tool_stock_prices(input: &serde_json::Value) -> Result<String, String> {
+    let tickers_array = input["tickers"].as_array().ok_or("Missing 'tickers' parameter")?;
+
+    let tickers: Vec<&str> = tickers_array
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+
+    if tickers.is_empty() {
+        return Err("No valid tickers provided".to_string());
+    }
+
+    let prices = crate::stock_price::fetch_stock_prices(&tickers).await?;
+
+    let mut output = format!("Stock Prices ({} tickers):\n\n", prices.len());
+    for (ticker, price) in &prices {
+        output.push_str(&format!("{}: ${:.2}\n", ticker, price));
     }
 
     Ok(output)
@@ -3643,19 +3723,35 @@ async fn tool_prediction_log(input: &serde_json::Value) -> Result<String, String
 /// Prediction evaluate tool handler.
 async fn tool_prediction_evaluate(input: &serde_json::Value) -> Result<String, String> {
     let ticker = input["ticker"].as_str();
-
-    // Parse current prices from input
-    let prices_obj = input["current_prices"].as_object()
-        .ok_or("Missing 'current_prices' parameter (must be an object with ticker: price pairs)")?;
-
-    let mut current_prices = std::collections::HashMap::new();
-    for (ticker, price) in prices_obj {
-        if let Some(p) = price.as_f64() {
-            current_prices.insert(ticker.clone(), p);
-        }
-    }
-
     let tracker = get_prediction_tracker()?;
+
+    // Get current prices - either from input or auto-fetch for all open predictions
+    let current_prices = if let Some(prices_obj) = input["current_prices"].as_object() {
+        // User provided prices explicitly
+        let mut prices = std::collections::HashMap::new();
+        for (ticker, price) in prices_obj {
+            if let Some(p) = price.as_f64() {
+                prices.insert(ticker.clone(), p);
+            }
+        }
+        prices
+    } else {
+        // Auto-fetch prices for all tickers with open predictions
+        let predictions = tracker.list_predictions(Some("open"), Some(1000))?;
+        let tickers: Vec<&str> = predictions
+            .iter()
+            .map(|p| p.ticker.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        if tickers.is_empty() {
+            return Ok("No open predictions to evaluate.".to_string());
+        }
+
+        crate::stock_price::fetch_stock_prices(&tickers).await?
+    };
+
     tracker.evaluate_predictions(ticker, &current_prices)
 }
 

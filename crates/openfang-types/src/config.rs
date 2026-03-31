@@ -425,6 +425,37 @@ pub struct FallbackProviderConfig {
     pub base_url: Option<String>,
 }
 
+/// Tool selection configuration (embedding-based smart tool filtering).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolSelectionConfig {
+    /// Enable embedding-based tool selection. Default: true.
+    pub enabled: bool,
+    /// Embedding model to use (e.g., "nomic-embed-text"). Default: "nomic-embed-text".
+    pub embedding_model: String,
+    /// Number of top tools to select per request. Default: 10.
+    pub top_k: usize,
+    /// Tools to always include, regardless of similarity score.
+    /// Default: ["web_search", "memory_store", "memory_query", "shell_exec"].
+    pub always_include: Vec<String>,
+}
+
+impl Default for ToolSelectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            embedding_model: "nomic-embed-text".to_string(),
+            top_k: 10,
+            always_include: vec![
+                "web_search".to_string(),
+                "memory_store".to_string(),
+                "memory_query".to_string(),
+                "shell_exec".to_string(),
+            ],
+        }
+    }
+}
+
 /// Text-to-speech configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1064,6 +1095,9 @@ pub struct KernelConfig {
     /// Text-to-speech configuration.
     #[serde(default)]
     pub tts: TtsConfig,
+    /// Tool selection configuration (embedding-based smart filtering).
+    #[serde(default)]
+    pub tool_selection: ToolSelectionConfig,
     /// Docker container sandbox configuration.
     #[serde(default)]
     pub docker: DockerSandboxConfig,
@@ -1298,6 +1332,7 @@ impl Default for KernelConfig {
             auto_reply: AutoReplyConfig::default(),
             canvas: CanvasConfig::default(),
             tts: TtsConfig::default(),
+            tool_selection: ToolSelectionConfig::default(),
             docker: DockerSandboxConfig::default(),
             pairing: PairingConfig::default(),
             auth_profiles: HashMap::new(),
