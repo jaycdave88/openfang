@@ -9,6 +9,42 @@ TS=$(date '+%Y-%m-%d %H:%M:%S')
 # Ensure log directory exists
 mkdir -p ~/.openfang
 
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S'): $1" >> $LOG
+}
+
+# Reusable OpenFang restart function
+restart_openfang() {
+    log "Stopping OpenFang..."
+    pkill -9 -f 'openfang start' 2>/dev/null
+    sleep 3
+
+    cd /Users/momo/intent/workspaces/https-github/repo
+
+    # Load env vars from .env
+    if [ -f /Users/momo/intent/workspaces/https-github/repo/.env ]; then
+        set -a
+        source /Users/momo/intent/workspaces/https-github/repo/.env
+        set +a
+    fi
+
+    # Export required tokens
+    source /Users/momo/.cargo/env
+    export DISCORD_BOT_TOKEN=$(grep DISCORD_BOT_TOKEN /Users/momo/intent/workspaces/https-github/repo/.env | cut -d= -f2)
+    export MEM0_API_TOKEN=$(grep MEM0_API_TOKEN /Users/momo/intent/workspaces/https-github/repo/.env | cut -d= -f2)
+    export NEO4J_USER=$(grep '^NEO4J_USER=' /Users/momo/intent/workspaces/https-github/repo/.env | cut -d= -f2)
+    export NEO4J_PASSWORD=$(grep '^NEO4J_PASSWORD=' /Users/momo/intent/workspaces/https-github/repo/.env | cut -d= -f2)
+    export SSHBOX_USER=$(grep '^SSHBOX_USER=' /Users/momo/intent/workspaces/https-github/repo/.env | cut -d= -f2)
+    export SSHBOX_PASSWORD=$(grep '^SSHBOX_PASSWORD=' /Users/momo/intent/workspaces/https-github/repo/.env | cut -d= -f2)
+    export MATRIX_ACCESS_TOKEN=AcXsn88QaYQy4YAqMdufwCK6qu1ZIZfo
+    export MATRIX_APPSERVICE_TOKEN=MqlKKaXVqjGUP89Cd2pMt7HdmUnj7zCvv2aCagpLZxhwGhgCJvMLrYTSm68BmAHU
+
+    nohup repos/openfang/target/release/openfang start >> ~/.openfang/openfang.log 2>&1 &
+    log "OpenFang starting - waiting 25s for boot..."
+    sleep 25
+    log "OpenFang restarted"
+}
+
 # 1. Ollama
 if ! pgrep -f "ollama serve" > /dev/null 2>&1; then
     echo "$TS: STARTING Ollama (was down)" >> $LOG
@@ -29,23 +65,53 @@ elif ! curl -s -m 5 http://localhost:11434/api/tags > /dev/null 2>&1; then
     echo "$TS: Ollama hard-restarted + models loaded" >> $LOG
 fi
 
-# 2. OpenFang
-if ! curl -s -m 5 http://127.0.0.1:4200/api/health > /dev/null 2>&1; then
-    echo "$TS: RESTARTING OpenFang (not healthy)" >> $LOG
-    pkill -9 -f 'openfang start'
-    sleep 3
-    cd /Users/momo/intent/workspaces/https-github/repo
-    source /Users/momo/.cargo/env
-    export DISCORD_BOT_TOKEN=$(grep DISCORD_BOT_TOKEN /Users/momo/intent/workspaces/https-github/repo/.env | cut -d= -f2)
-    export MEM0_API_TOKEN=v9WNtaNzYepldseeMANP3SJ2oUFmBIcA
-    export NEO4J_USER=neo4j
-    export NEO4J_PASSWORD=RA3MeCEx7mqmaVptrwRocCQNst5vLhC5
-    export SSHBOX_USER=agent
-    export SSHBOX_PASSWORD=0xoydw9yw8jUWCJzJdZ2RBVSYsMV4EAQ
-    export MATRIX_ACCESS_TOKEN=AcXsn88QaYQy4YAqMdufwCK6qu1ZIZfo
-    export MATRIX_APPSERVICE_TOKEN=MqlKKaXVqjGUP89Cd2pMt7HdmUnj7zCvv2aCagpLZxhwGhgCJvMLrYTSm68BmAHU
-    nohup repos/openfang/target/release/openfang start >> ~/.openfang/openfang.log 2>&1 &
-    echo "$TS: OpenFang restarted" >> $LOG
+# 2. OpenFang - Smart Health Checks
+OPENFANG_NEEDS_RESTART=false
+
+# A. Process check
+if ! pgrep -f 'openfang start' > /dev/null 2>&1; then
+    log "OpenFang process not running - restarting"
+    OPENFANG_NEEDS_RESTART=true
+fi
+
+# B. API health check (only if process is running)
+if [ "$OPENFANG_NEEDS_RESTART" = false ]; then
+    HEALTH=$(curl -s -m 5 http://127.0.0.1:4200/api/health 2>/dev/null)
+    if ! echo "$HEALTH" | grep -q "ok"; then
+        log "OpenFang process alive but API not responding - restarting"
+        OPENFANG_NEEDS_RESTART=true
+    fi
+fi
+
+# C. Crash count check
+if [ "$OPENFANG_NEEDS_RESTART" = false ]; then
+    CRASH_COUNT=$(grep -c 'Crashed for recovery' <(tail -100 ~/.openfang/openfang.log) 2>/dev/null || echo '0')
+    if [ "$CRASH_COUNT" -gt 10 ]; then
+        log "OpenFang has $CRASH_COUNT recent crashes - restarting fresh"
+        OPENFANG_NEEDS_RESTART=true
+    fi
+fi
+
+# D. Stale Matrix check (8am-10pm only)
+if [ "$OPENFANG_NEEDS_RESTART" = false ]; then
+    HOUR=$(date +%H)
+    if [ "$HOUR" -ge 8 ] && [ "$HOUR" -le 22 ]; then
+        LAST_MATRIX=$(grep -i 'matrix.*message\|channel.*received\|matrix.*sync' ~/.openfang/openfang.log 2>/dev/null | tail -1 | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}' | tail -1)
+        if [ -n "$LAST_MATRIX" ]; then
+            LAST_EPOCH=$(date -j -f '%Y-%m-%dT%H:%M' "$LAST_MATRIX" '+%s' 2>/dev/null || echo '0')
+            NOW_EPOCH=$(date '+%s')
+            STALE=$(( NOW_EPOCH - LAST_EPOCH ))
+            if [ "$STALE" -gt 7200 ]; then
+                log "OpenFang Matrix stale (${STALE}s) - restarting"
+                OPENFANG_NEEDS_RESTART=true
+            fi
+        fi
+    fi
+fi
+
+# Restart if any check failed
+if [ "$OPENFANG_NEEDS_RESTART" = true ]; then
+    restart_openfang
 fi
 
 # 3. Bridge (check for actual binary, not monitor scripts)

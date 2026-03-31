@@ -10,13 +10,16 @@ use futures::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
 const SYNC_TIMEOUT_MS: u64 = 30000;
 const MAX_MESSAGE_LEN: usize = 4096;
+/// If no Matrix events arrive within this duration, force a reconnect.
+/// This catches stale connections when the downstream bridge restarts.
+const STALENESS_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
 
 /// Matrix channel adapter using the Client-Server API.
 pub struct MatrixAdapter {
@@ -349,8 +352,29 @@ impl ChannelAdapter for MatrixAdapter {
 
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
+            let mut last_event_time = Instant::now();
 
             loop {
+                // Staleness check: if no events for STALENESS_TIMEOUT, force reconnect
+                // by resetting the since token. This catches stale connections when the
+                // downstream bridge (e.g. mautrix-imessage) restarts.
+                if last_event_time.elapsed() > STALENESS_TIMEOUT {
+                    warn!(
+                        "Matrix sync stale — no events for {}s, forcing reconnect",
+                        last_event_time.elapsed().as_secs()
+                    );
+                    // Reset since token to force a fresh initial sync
+                    *since_token.write().await = None;
+                    if let Some(token) = initial_sync(&client, &homeserver, access_token.as_str()).await {
+                        info!("Matrix: reconnect initial sync complete, resuming");
+                        *since_token.write().await = Some(token);
+                    } else {
+                        warn!("Matrix: reconnect initial sync failed, will retry");
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                    }
+                    last_event_time = Instant::now();
+                }
+
                 // Build /sync URL
                 let since = since_token.read().await.clone();
                 let mut url = format!(
@@ -417,6 +441,20 @@ impl ChannelAdapter for MatrixAdapter {
                                 .await;
                         }
                     }
+                }
+
+                // Reset staleness timer if sync returned any room data
+                // (join events, invite events, or any other room activity).
+                let has_join_data = body["rooms"]["join"]
+                    .as_object()
+                    .map(|r| !r.is_empty())
+                    .unwrap_or(false);
+                let has_invite_data = body["rooms"]["invite"]
+                    .as_object()
+                    .map(|r| !r.is_empty())
+                    .unwrap_or(false);
+                if has_join_data || has_invite_data {
+                    last_event_time = Instant::now();
                 }
 
                 // Process room events
