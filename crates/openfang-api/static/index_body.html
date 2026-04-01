@@ -3123,12 +3123,13 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                       <div class="trader-heatmap-wrap" x-show="dashboardData && dashboardData.watchlist_heatmap && dashboardData.watchlist_heatmap.length">
                         <table class="trader-heatmap-table">
                           <thead>
-                            <tr><th>Ticker</th><th>Change</th><th>Signal</th><th>Confidence</th></tr>
+                            <tr><th>Ticker</th><th>Type</th><th>Change</th><th>Signal</th><th>Confidence</th></tr>
                           </thead>
                           <tbody>
                             <template x-for="item in (dashboardData ? dashboardData.watchlist_heatmap || [] : [])" :key="item.ticker">
                               <tr>
                                 <td style="font-weight:600" x-text="item.ticker"></td>
+                                <td><span x-text="item.asset_type === 'crypto' ? '🪙' : '📈'" style="font-size:12px" :title="item.asset_type === 'crypto' ? 'Crypto (24/7)' : 'Stock'"></span></td>
                                 <td :class="item.change_pct >= 0 ? 'heatmap-positive' : 'heatmap-negative'" x-text="(item.change_pct >= 0 ? '+' : '') + item.change_pct + '%'"></td>
                                 <td><span class="signal-badge" :class="'signal-' + (item.signal || 'hold').toLowerCase()" x-text="item.signal || 'HOLD'"></span></td>
                                 <td>
@@ -3152,13 +3153,14 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                     <div x-show="dashboardData && dashboardData.recent_trades && dashboardData.recent_trades.length">
                       <table class="trader-trades-table">
                         <thead>
-                          <tr><th>Date</th><th>Ticker</th><th>Side</th><th>Price</th><th>Qty</th><th>P&amp;L</th></tr>
+                          <tr><th>Date</th><th>Asset</th><th>Type</th><th>Side</th><th>Price</th><th>Qty</th><th>P&amp;L</th></tr>
                         </thead>
                         <tbody>
                           <template x-for="trade in (dashboardData ? dashboardData.recent_trades || [] : [])" :key="trade.date + trade.ticker">
                             <tr>
                               <td class="text-dim" x-text="trade.date"></td>
                               <td style="font-weight:600" x-text="trade.ticker"></td>
+                              <td><span class="badge" :class="trade.asset_type === 'crypto' ? 'badge-crypto' : 'badge-stock'" x-text="trade.asset_type === 'crypto' ? '🪙 Crypto' : '📈 Stock'" style="font-size:9px;padding:2px 6px"></span></td>
                               <td><span class="trade-side-badge" :class="trade.side === 'BUY' ? 'trade-buy' : 'trade-sell'" x-text="trade.side"></span></td>
                               <td x-text="'$' + Number(trade.price || 0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})"></td>
                               <td x-text="trade.qty"></td>

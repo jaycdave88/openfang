@@ -453,6 +453,7 @@ pub async fn execute_tool(
         "paper_trade_sell" => tool_paper_trade_sell(input).await,
         "portfolio_status" => tool_portfolio_status().await,
         "trade_history" => tool_trade_history(input).await,
+        "crypto_scan" => tool_crypto_scan().await,
 
         // Stock price tools
         "stock_price" => tool_stock_price(input).await,
@@ -1276,35 +1277,35 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- Paper trading tools ---
         ToolDefinition {
             name: "paper_trade_buy".to_string(),
-            description: "Buy shares in the paper trading portfolio. Enforces risk limits: max 10% per position, max 5 concurrent positions.".to_string(),
+            description: "Buy stocks or crypto in the paper trading portfolio. Supports fractional quantities for crypto (e.g., 0.01 BTC). Auto-detects crypto tickers (BTC, ETH, SOL, etc.). Enforces risk limits: max 10% per position, max 5 concurrent positions.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "ticker": { "type": "string", "description": "Stock ticker symbol (e.g., 'AAPL', 'TSLA')" },
-                    "shares": { "type": "integer", "description": "Number of shares to buy" },
+                    "ticker": { "type": "string", "description": "Stock or crypto ticker symbol (e.g., 'AAPL', 'BTC', 'ETH', 'SOL')" },
+                    "quantity": { "type": "number", "description": "Quantity to buy (supports fractional for crypto, e.g., 0.01 BTC)" },
                     "price": { "type": "number", "description": "Optional limit price. If not provided, uses market price." },
                     "reason": { "type": "string", "description": "Optional reason for the trade" }
                 },
-                "required": ["ticker", "shares"]
+                "required": ["ticker", "quantity"]
             }),
         },
         ToolDefinition {
             name: "paper_trade_sell".to_string(),
-            description: "Sell shares from the paper trading portfolio. Shows P&L for the trade.".to_string(),
+            description: "Sell stocks or crypto from the paper trading portfolio. Supports fractional quantities for crypto. Shows P&L for the trade.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "ticker": { "type": "string", "description": "Stock ticker symbol (e.g., 'AAPL', 'TSLA')" },
-                    "shares": { "type": "integer", "description": "Number of shares to sell" },
+                    "ticker": { "type": "string", "description": "Stock or crypto ticker symbol (e.g., 'AAPL', 'BTC', 'ETH', 'SOL')" },
+                    "quantity": { "type": "number", "description": "Quantity to sell (supports fractional for crypto)" },
                     "price": { "type": "number", "description": "Optional limit price. If not provided, uses market price." },
                     "reason": { "type": "string", "description": "Optional reason for the trade" }
                 },
-                "required": ["ticker", "shares"]
+                "required": ["ticker", "quantity"]
             }),
         },
         ToolDefinition {
             name: "portfolio_status".to_string(),
-            description: "Get current paper trading portfolio status including all positions, P&L, and total value.".to_string(),
+            description: "Get current paper trading portfolio status including all positions (stocks and crypto), P&L, and total value. Crypto positions shown separately.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {}
@@ -1321,25 +1322,33 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 }
             }),
         },
+        ToolDefinition {
+            name: "crypto_scan".to_string(),
+            description: "Scan major cryptocurrencies for current prices. Returns prices for BTC, ETH, SOL and other tracked cryptos. Runs 24/7 via cron every 30 minutes.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
         // --- Stock price tools ---
         ToolDefinition {
             name: "stock_price".to_string(),
-            description: "Get real-time stock price from Google Finance. Returns current market price for a single ticker. Free, no API key required. Prices are cached for 5 minutes.".to_string(),
+            description: "Get real-time price for a stock or crypto ticker. Auto-detects crypto tickers (BTC, ETH, SOL, etc.) and fetches from CoinGecko. Stocks are fetched from Google Finance. Free, no API key required. Prices are cached for 5 minutes.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "ticker": { "type": "string", "description": "Stock ticker symbol (e.g., 'AAPL', 'TSLA')" }
+                    "ticker": { "type": "string", "description": "Stock or crypto ticker symbol (e.g., 'AAPL', 'BTC', 'ETH', 'SOL')" }
                 },
                 "required": ["ticker"]
             }),
         },
         ToolDefinition {
             name: "stock_prices".to_string(),
-            description: "Get real-time stock prices for multiple tickers from Google Finance. Fetches prices in parallel for efficiency. Returns a mapping of ticker → price. Free, no API key required. Prices are cached for 5 minutes.".to_string(),
+            description: "Get real-time prices for multiple stock or crypto tickers. Fetches prices in parallel. Auto-detects crypto tickers. Free, no API key required. Prices are cached for 5 minutes.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "tickers": { "type": "array", "items": { "type": "string" }, "description": "Array of stock ticker symbols (e.g., ['AAPL', 'MSFT', 'NVDA'])" }
+                    "tickers": { "type": "array", "items": { "type": "string" }, "description": "Array of stock or crypto ticker symbols (e.g., ['AAPL', 'BTC', 'ETH'])" }
                 },
                 "required": ["tickers"]
             }),
@@ -3526,23 +3535,31 @@ fn get_paper_trading_engine() -> Result<crate::paper_trading::PaperTradingEngine
 /// Paper trade buy tool handler.
 async fn tool_paper_trade_buy(input: &serde_json::Value) -> Result<String, String> {
     let ticker = input["ticker"].as_str().ok_or("Missing 'ticker' parameter")?;
-    let shares = input["shares"].as_i64().ok_or("Missing 'shares' parameter")?;
+    // Accept both "quantity" (new) and "shares" (legacy) parameter names
+    let quantity = input["quantity"].as_f64()
+        .or_else(|| input["shares"].as_f64())
+        .or_else(|| input["shares"].as_i64().map(|s| s as f64))
+        .ok_or("Missing 'quantity' parameter")?;
     let price = input["price"].as_f64();
     let reason = input["reason"].as_str().map(|s| s.to_string());
 
     let engine = get_paper_trading_engine()?;
-    engine.buy(ticker, shares, price, reason).await
+    engine.buy(ticker, quantity, price, reason).await
 }
 
 /// Paper trade sell tool handler.
 async fn tool_paper_trade_sell(input: &serde_json::Value) -> Result<String, String> {
     let ticker = input["ticker"].as_str().ok_or("Missing 'ticker' parameter")?;
-    let shares = input["shares"].as_i64().ok_or("Missing 'shares' parameter")?;
+    // Accept both "quantity" (new) and "shares" (legacy) parameter names
+    let quantity = input["quantity"].as_f64()
+        .or_else(|| input["shares"].as_f64())
+        .or_else(|| input["shares"].as_i64().map(|s| s as f64))
+        .ok_or("Missing 'quantity' parameter")?;
     let price = input["price"].as_f64();
     let reason = input["reason"].as_str().map(|s| s.to_string());
 
     let engine = get_paper_trading_engine()?;
-    engine.sell(ticker, shares, price, reason).await
+    engine.sell(ticker, quantity, price, reason).await
 }
 
 /// Portfolio status tool handler.
@@ -3560,27 +3577,67 @@ async fn tool_portfolio_status() -> Result<String, String> {
     // Fetch current prices for all positions
     let tickers: Vec<&str> = status.positions.iter().map(|p| p.ticker.as_str()).collect();
     let current_prices = crate::stock_price::fetch_stock_prices(&tickers).await
-        .unwrap_or_default(); // Use cached prices if fetch fails
+        .unwrap_or_default();
+
+    // Separate stock and crypto positions
+    let stock_positions: Vec<&crate::paper_trading::Position> = status.positions.iter()
+        .filter(|p| p.asset_type != "crypto")
+        .collect();
+    let crypto_positions: Vec<&crate::paper_trading::Position> = status.positions.iter()
+        .filter(|p| p.asset_type == "crypto")
+        .collect();
 
     let mut total_position_value = 0.0;
     let mut output = format!(
-        "Paper Trading Portfolio\n\nCash Balance: ${:.2}\n\nPositions:\n",
+        "Paper Trading Portfolio\n\nCash Balance: ${:.2}\n",
         status.balance
     );
 
-    for pos in &status.positions {
-        let current_price = current_prices.get(&pos.ticker).copied().unwrap_or(pos.current_value / pos.shares as f64);
-        let current_value = current_price * pos.shares as f64;
-        let cost_basis = pos.avg_cost * pos.shares as f64;
-        let pnl = current_value - cost_basis;
-        let pnl_pct = (pnl / cost_basis) * 100.0;
+    // Stock positions
+    if !stock_positions.is_empty() {
+        output.push_str("\n📈 Stock Positions:\n");
+        for pos in &stock_positions {
+            let current_price = current_prices.get(&pos.ticker).copied()
+                .unwrap_or_else(|| if pos.quantity > 0.0 { pos.current_value / pos.quantity } else { 0.0 });
+            let current_value = current_price * pos.quantity;
+            let cost_basis = pos.avg_cost * pos.quantity;
+            let pnl = current_value - cost_basis;
+            let pnl_pct = if cost_basis > 0.0 { (pnl / cost_basis) * 100.0 } else { 0.0 };
+            total_position_value += current_value;
 
-        total_position_value += current_value;
+            output.push_str(&format!(
+                "  {} - {} shares @ ${:.2} avg cost, current ${:.2}, value: ${:.2} (P&L: ${:+.2}, {:+.2}%)\n",
+                pos.ticker, pos.quantity as i64, pos.avg_cost, current_price, current_value, pnl, pnl_pct
+            ));
+        }
+    }
 
-        output.push_str(&format!(
-            "  {} - {} shares @ ${:.2} avg cost, current ${:.2}, value: ${:.2} (P&L: ${:+.2}, {:+.2}%)\n",
-            pos.ticker, pos.shares, pos.avg_cost, current_price, current_value, pnl, pnl_pct
-        ));
+    // Crypto positions
+    if !crypto_positions.is_empty() {
+        output.push_str("\n🪙 Crypto Positions:\n");
+        for pos in &crypto_positions {
+            let current_price = current_prices.get(&pos.ticker).copied()
+                .unwrap_or_else(|| if pos.quantity > 0.0 { pos.current_value / pos.quantity } else { 0.0 });
+            let current_value = current_price * pos.quantity;
+            let cost_basis = pos.avg_cost * pos.quantity;
+            let pnl = current_value - cost_basis;
+            let pnl_pct = if cost_basis > 0.0 { (pnl / cost_basis) * 100.0 } else { 0.0 };
+            total_position_value += current_value;
+
+            let qty_str = if pos.quantity >= 1.0 {
+                format!("{:.4}", pos.quantity)
+            } else {
+                format!("{:.8}", pos.quantity)
+            };
+            output.push_str(&format!(
+                "  {} - {} @ ${:.2} avg cost, current ${:.2}, value: ${:.2} (P&L: ${:+.2}, {:+.2}%)\n",
+                pos.ticker, qty_str, pos.avg_cost, current_price, current_value, pnl, pnl_pct
+            ));
+        }
+    }
+
+    if stock_positions.is_empty() && crypto_positions.is_empty() {
+        output.push_str("\nPositions:\n  (no positions)\n");
     }
 
     let total_value = status.balance + total_position_value;
@@ -3603,14 +3660,38 @@ async fn tool_trade_history(input: &serde_json::Value) -> Result<String, String>
 
     let mut output = format!("Trade History ({} trades):\n\n", trades.len());
     for trade in &trades {
+        let icon = if trade.asset_type == "crypto" { "🪙" } else { "📈" };
+        let qty_str = if trade.asset_type == "crypto" {
+            if trade.quantity >= 1.0 { format!("{:.4}", trade.quantity) }
+            else { format!("{:.8}", trade.quantity) }
+        } else {
+            format!("{} shares", trade.quantity as i64)
+        };
         output.push_str(&format!(
-            "{} - {} {} shares of {} @ ${:.2} (ID: {})\n",
-            trade.timestamp, trade.side.to_uppercase(), trade.shares, trade.ticker, trade.price, trade.id
+            "{} {} - {} {} of {} @ ${:.2} (ID: {})\n",
+            icon, trade.timestamp, trade.side.to_uppercase(), qty_str, trade.ticker, trade.price, trade.id
         ));
         if let Some(ref reason) = trade.reason {
             output.push_str(&format!("  Reason: {}\n", reason));
         }
     }
+
+    Ok(output)
+}
+
+/// Crypto scan tool handler — fetches current prices for major cryptocurrencies.
+async fn tool_crypto_scan() -> Result<String, String> {
+    let crypto_tickers = &["BTC", "ETH", "SOL", "ADA", "DOT", "AVAX", "LINK", "XRP", "DOGE"];
+    let prices = crate::stock_price::fetch_crypto_prices(crypto_tickers).await?;
+
+    let mut output = "🪙 Crypto Price Scan\n\n".to_string();
+    // Sort by market cap (roughly by position in list)
+    for ticker in crypto_tickers {
+        if let Some(price) = prices.get(*ticker) {
+            output.push_str(&format!("{}: ${:.2}\n", ticker, price));
+        }
+    }
+    output.push_str(&format!("\nScanned at: {}\n", chrono::Utc::now().to_rfc3339()));
 
     Ok(output)
 }
@@ -4816,6 +4897,20 @@ mod tests {
         let output = result.unwrap();
         assert!(output.contains("Paper Trading Portfolio"));
         assert!(output.contains("Cash Balance"));
-        assert!(output.contains("Total Value"));
+    }
+
+    #[tokio::test]
+    async fn test_paper_trade_buy_crypto() {
+        let input = serde_json::json!({
+            "ticker": "BTC",
+            "quantity": 0.01,
+            "price": 60000.0,
+            "reason": "Test crypto buy"
+        });
+        let result = tool_paper_trade_buy(&input).await;
+        assert!(result.is_ok(), "Crypto buy should succeed: {:?}", result);
+        let output = result.unwrap();
+        assert!(output.contains("Bought"));
+        assert!(output.contains("BTC"));
     }
 }

@@ -36,7 +36,7 @@ restart_openfang() {
     export NEO4J_PASSWORD=$(grep '^NEO4J_PASSWORD=' /Users/momo/intent/workspaces/https-github/repo/.env | cut -d= -f2)
     export SSHBOX_USER=$(grep '^SSHBOX_USER=' /Users/momo/intent/workspaces/https-github/repo/.env | cut -d= -f2)
     export SSHBOX_PASSWORD=$(grep '^SSHBOX_PASSWORD=' /Users/momo/intent/workspaces/https-github/repo/.env | cut -d= -f2)
-    export MATRIX_ACCESS_TOKEN=AcXsn88QaYQy4YAqMdufwCK6qu1ZIZfo
+    export MATRIX_ACCESS_TOKEN=ZSuy97KcT8pJDsXLfytwxEpvkEI8DYep
     export MATRIX_APPSERVICE_TOKEN=MqlKKaXVqjGUP89Cd2pMt7HdmUnj7zCvv2aCagpLZxhwGhgCJvMLrYTSm68BmAHU
 
     nohup repos/openfang/target/release/openfang start >> ~/.openfang/openfang.log 2>&1 &
@@ -127,6 +127,49 @@ if ! pgrep -f "mautrix-wsproxy" > /dev/null 2>&1; then
     cd /Users/momo/mautrix-wsproxy
     nohup ./mautrix-wsproxy -config config.yaml > /tmp/wsproxy.log 2>&1 &
     echo "$TS: Wsproxy restarted" >> $LOG
+fi
+
+# 5. A2A Agents — auto-restart if not responding
+A2A_DIR="/Users/momo/intent/workspaces/https-github/repo/repos"
+
+restart_a2a_agent() {
+    local name="$1" dir="$2" port="$3" venv_path="${4:-.venv}"
+    log "Restarting A2A agent: $name (port $port)"
+    # Kill any existing process on the port
+    lsof -ti:$port | xargs kill -9 2>/dev/null
+    sleep 2
+    cd "$A2A_DIR/$dir"
+    if [ -d "$venv_path" ]; then
+        source "$venv_path/bin/activate"
+        nohup python a2a_server.py >> ~/.openfang/a2a-$name.log 2>&1 &
+        deactivate 2>/dev/null || true
+    fi
+    log "A2A agent $name restarted on port $port"
+}
+
+# DeerFlow (port 2024) — venv is in backend/.venv
+if ! curl -s -m 5 http://localhost:2024/.well-known/agent.json > /dev/null 2>&1; then
+    restart_a2a_agent "deer-flow" "deer-flow" 2024 "backend/.venv"
+fi
+
+# TradingAgents (port 8100)
+if ! curl -s -m 5 http://localhost:8100/.well-known/agent.json > /dev/null 2>&1; then
+    restart_a2a_agent "trading-agents" "TradingAgents" 8100
+fi
+
+# MicroFish (port 5001)
+if ! curl -s -m 5 http://localhost:5001/.well-known/agent.json > /dev/null 2>&1; then
+    restart_a2a_agent "microfish" "MicroFish-En" 5001
+fi
+
+# WorldMonitor (port 5174)
+if ! curl -s -m 5 http://localhost:5174/.well-known/agent.json > /dev/null 2>&1; then
+    restart_a2a_agent "worldmonitor" "worldmonitor" 5174
+fi
+
+# AgenticTrading (port 8200)
+if ! curl -s -m 5 http://localhost:8200/.well-known/agent.json > /dev/null 2>&1; then
+    restart_a2a_agent "agentic-trading" "AgenticTrading" 8200
 fi
 
 echo "$TS: Watchdog check complete" >> $LOG
