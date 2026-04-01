@@ -55,7 +55,7 @@ pub struct ModelRoutingConfig {
     /// Enable two-stage dynamic tool selection (Stage 1: classify → Stage 2: filtered tools).
     #[serde(default)]
     pub dynamic_tool_selection: bool,
-    /// Model to use for the tool-selection classification step (should be fast, e.g. "qwen3.5:4b").
+    /// Model to use for the tool-selection classification step (should be fast, e.g. "qwen3.5:9b").
     #[serde(default = "default_tool_selector_model")]
     pub tool_selector_model: String,
     /// Category → tool name patterns mapping for dynamic tool selection.
@@ -65,7 +65,7 @@ pub struct ModelRoutingConfig {
 }
 
 fn default_tool_selector_model() -> String {
-    "qwen3.5:4b".to_string()
+    "qwen3.5:9b".to_string()
 }
 
 /// Default tool group mapping — categories to tool name patterns.

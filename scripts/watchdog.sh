@@ -48,7 +48,7 @@ restart_openfang() {
 # 1. Ollama
 if ! pgrep -f "ollama serve" > /dev/null 2>&1; then
     echo "$TS: STARTING Ollama (was down)" >> $LOG
-    OLLAMA_NUM_PARALLEL=1 OLLAMA_FLASH_ATTENTION=1 OLLAMA_MAX_LOADED_MODELS=3 OLLAMA_KEEP_ALIVE=-1 /opt/homebrew/bin/ollama serve > /tmp/ollama-serve.log 2>&1 &
+    OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_QUEUE=50 OLLAMA_FLASH_ATTENTION=1 OLLAMA_MAX_LOADED_MODELS=3 OLLAMA_KEEP_ALIVE=-1 /opt/homebrew/bin/ollama serve > /tmp/ollama-serve.log 2>&1 &
     sleep 15
     # Load models
     curl -s -X POST http://localhost:11434/api/generate -d '{"model":"qwen3:30b-a3b","prompt":"","keep_alive":-1}' > /dev/null 2>&1
@@ -58,7 +58,7 @@ elif ! curl -s -m 5 http://localhost:11434/api/tags > /dev/null 2>&1; then
     echo "$TS: RESTARTING Ollama (running but not responding)" >> $LOG
     pkill -9 -f "ollama serve"
     sleep 5
-    OLLAMA_NUM_PARALLEL=1 OLLAMA_FLASH_ATTENTION=1 OLLAMA_MAX_LOADED_MODELS=3 OLLAMA_KEEP_ALIVE=-1 /opt/homebrew/bin/ollama serve > /tmp/ollama-serve.log 2>&1 &
+    OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_QUEUE=50 OLLAMA_FLASH_ATTENTION=1 OLLAMA_MAX_LOADED_MODELS=3 OLLAMA_KEEP_ALIVE=-1 /opt/homebrew/bin/ollama serve > /tmp/ollama-serve.log 2>&1 &
     sleep 15
     curl -s -X POST http://localhost:11434/api/generate -d '{"model":"qwen3:30b-a3b","prompt":"","keep_alive":-1}' > /dev/null 2>&1
     curl -s -X POST http://localhost:11434/api/generate -d '{"model":"nomic-embed-text","prompt":"","keep_alive":-1}' > /dev/null 2>&1

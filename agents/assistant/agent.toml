@@ -79,8 +79,8 @@ shell = ["python *", "cargo *", "git *", "npm *"]
 
 [routing]
 dynamic_tool_selection = true
-tool_selector_model = "qwen3.5:4b"
-simple_model = "qwen3.5:4b"
+tool_selector_model = "qwen3.5:9b"
+simple_model = "qwen3.5:9b"
 medium_model = "default"
 complex_model = "default"
 simple_threshold = 200
