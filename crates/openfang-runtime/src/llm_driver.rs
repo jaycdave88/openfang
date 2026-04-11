@@ -48,6 +48,20 @@ pub enum LlmError {
     ModelNotFound(String),
 }
 
+/// Priority level for LLM completion requests.
+///
+/// Interactive requests (from chat channels) bypass the background agent queue,
+/// ensuring users always get responsive replies even when background agents are
+/// saturating the LLM backend.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RequestPriority {
+    /// Chat messages from users — always get served.
+    Interactive,
+    /// Background scheduled tasks — yield to Interactive.
+    #[default]
+    Background,
+}
+
 /// A request to an LLM for completion.
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
@@ -65,6 +79,8 @@ pub struct CompletionRequest {
     pub system: Option<String>,
     /// Extended thinking configuration (if supported by the model).
     pub thinking: Option<openfang_types::config::ThinkingConfig>,
+    /// Request priority — Interactive requests bypass background semaphore.
+    pub priority: RequestPriority,
 }
 
 /// A response from an LLM completion.
@@ -304,6 +320,7 @@ mod tests {
             temperature: 0.0,
             system: None,
             thinking: None,
+            priority: RequestPriority::Background,
         };
 
         let response = driver.stream(request, tx).await.unwrap();
@@ -321,5 +338,28 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_request_priority_default_is_background() {
+        let priority = RequestPriority::default();
+        assert_eq!(priority, RequestPriority::Background);
+    }
+
+    #[test]
+    fn test_request_priority_variants_distinct() {
+        assert_ne!(RequestPriority::Interactive, RequestPriority::Background);
+        assert_eq!(RequestPriority::Interactive, RequestPriority::Interactive);
+        assert_eq!(RequestPriority::Background, RequestPriority::Background);
+    }
+
+    #[test]
+    fn test_request_priority_debug_and_clone() {
+        let p = RequestPriority::Interactive;
+        let cloned = p;
+        assert_eq!(p, cloned);
+        // Ensure Debug is implemented
+        let debug_str = format!("{:?}", p);
+        assert!(debug_str.contains("Interactive"));
     }
 }

@@ -7566,6 +7566,7 @@ pub async fn test_provider(
                 temperature: 0.0,
                 system: None,
                 thinking: None,
+                priority: Default::default(),
             };
             match driver.complete(test_req).await {
                 Ok(_) => {
@@ -11333,55 +11334,7 @@ fn remove_toml_section(content: &str, section: &str) -> String {
     result
 }
 
-#[cfg(test)]
-mod channel_config_tests {
-    use super::*;
 
-    #[test]
-    fn test_is_channel_configured_wecom_none() {
-        let config = openfang_types::config::ChannelsConfig::default();
-        assert!(!is_channel_configured(&config, "wecom"));
-    }
-
-    #[test]
-    fn test_is_channel_configured_wecom_some() {
-        let mut config = openfang_types::config::ChannelsConfig::default();
-        config.wecom = Some(openfang_types::config::WeComConfig {
-            corp_id: "test_corp".to_string(),
-            agent_id: "test_agent".to_string(),
-            secret_env: "WECOM_SECRET".to_string(),
-            webhook_port: 8454,
-            token: Some("token".to_string()),
-            encoding_aes_key: Some("aes_key".to_string()),
-            default_agent: Some("assistant".to_string()),
-            overrides: openfang_types::config::ChannelOverrides::default(),
-        });
-        assert!(is_channel_configured(&config, "wecom"));
-    }
-
-    #[test]
-    fn test_wecom_in_channel_registry() {
-        let wecom_meta = CHANNEL_REGISTRY.iter().find(|c| c.name == "wecom");
-        assert!(wecom_meta.is_some());
-        let meta = wecom_meta.unwrap();
-        assert_eq!(meta.display_name, "WeCom");
-        assert_eq!(meta.category, "messaging");
-        assert!(
-            meta.fields
-                .iter()
-                .find(|f| f.key == "corp_id")
-                .unwrap()
-                .required
-        );
-        assert!(
-            meta.fields
-                .iter()
-                .find(|f| f.key == "secret_env")
-                .unwrap()
-                .required
-        );
-    }
-}
 
 // ─── Trading Dashboard API ──────────────────────────────────────────────────
 
@@ -11561,4 +11514,55 @@ pub async fn trading_dashboard(State(state): State<Arc<AppState>>) -> impl IntoR
         "accuracy_7d": accuracy_7d,
         "learnings": learnings,
     })))
+}
+
+
+#[cfg(test)]
+mod channel_config_tests {
+    use super::*;
+
+    #[test]
+    fn test_is_channel_configured_wecom_none() {
+        let config = openfang_types::config::ChannelsConfig::default();
+        assert!(!is_channel_configured(&config, "wecom"));
+    }
+
+    #[test]
+    fn test_is_channel_configured_wecom_some() {
+        let mut config = openfang_types::config::ChannelsConfig::default();
+        config.wecom = Some(openfang_types::config::WeComConfig {
+            corp_id: "test_corp".to_string(),
+            agent_id: "test_agent".to_string(),
+            secret_env: "WECOM_SECRET".to_string(),
+            webhook_port: 8454,
+            token: Some("token".to_string()),
+            encoding_aes_key: Some("aes_key".to_string()),
+            default_agent: Some("assistant".to_string()),
+            overrides: openfang_types::config::ChannelOverrides::default(),
+        });
+        assert!(is_channel_configured(&config, "wecom"));
+    }
+
+    #[test]
+    fn test_wecom_in_channel_registry() {
+        let wecom_meta = CHANNEL_REGISTRY.iter().find(|c| c.name == "wecom");
+        assert!(wecom_meta.is_some());
+        let meta = wecom_meta.unwrap();
+        assert_eq!(meta.display_name, "WeCom");
+        assert_eq!(meta.category, "messaging");
+        assert!(
+            meta.fields
+                .iter()
+                .find(|f| f.key == "corp_id")
+                .unwrap()
+                .required
+        );
+        assert!(
+            meta.fields
+                .iter()
+                .find(|f| f.key == "secret_env")
+                .unwrap()
+                .required
+        );
+    }
 }

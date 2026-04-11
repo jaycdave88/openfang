@@ -11,6 +11,7 @@ pub mod fallback;
 pub mod gemini;
 pub mod openai;
 pub mod qwen_code;
+pub mod priority;
 
 use crate::llm_driver::{DriverConfig, LlmDriver, LlmError};
 use openfang_types::model_catalog::{

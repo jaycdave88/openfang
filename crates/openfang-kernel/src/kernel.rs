@@ -41,6 +41,13 @@ use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, info, warn};
 
 /// The main OpenFang kernel — coordinates all subsystems.
+/// Maximum concurrent interactive (channel) LLM requests.
+/// Separate from the background semaphore so chat messages always get served.
+const MAX_CONCURRENT_INTERACTIVE_LLM: usize = 2;
+
+/// Maximum number of concurrent background LLM calls across all agents.
+const MAX_CONCURRENT_BG_LLM: usize = 2;
+
 /// Stub LLM driver used when no providers are configured.
 /// Returns a helpful error so the dashboard still boots and users can configure providers.
 struct StubDriver;
@@ -84,6 +91,10 @@ pub struct OpenFangKernel {
     pub metering: Arc<MeteringEngine>,
     /// Default LLM driver (from kernel config).
     default_driver: Arc<dyn LlmDriver>,
+    /// Global semaphore for interactive LLM requests.
+    pub interactive_llm_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Global semaphore for background LLM requests.
+    pub background_llm_semaphore: Arc<tokio::sync::Semaphore>,
     /// WASM sandbox engine (shared across all WASM agent executions).
     wasm_sandbox: WasmSandbox,
     /// RBAC authentication manager.
@@ -1054,6 +1065,9 @@ impl OpenFangKernel {
         let initial_broadcast = config.broadcast.clone();
         let auto_reply_engine = crate::auto_reply::AutoReplyEngine::new(config.auto_reply.clone());
 
+        let interactive_llm_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_INTERACTIVE_LLM));
+        let background_llm_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BG_LLM));
+
         // Tool selector will be initialized after MCP tools are loaded in start_background_agents
 
         let kernel = Self {
@@ -1070,6 +1084,8 @@ impl OpenFangKernel {
             audit_log: Arc::new(AuditLog::with_db(memory.usage_conn())),
             metering,
             default_driver: driver,
+            interactive_llm_semaphore,
+            background_llm_semaphore,
             wasm_sandbox,
             auth,
             model_catalog: std::sync::RwLock::new(model_catalog),
@@ -1824,6 +1840,15 @@ impl OpenFangKernel {
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
         let mut manifest = entry.manifest.clone();
 
+        // Tag channel-originated messages as Interactive priority (streaming path).
+        let is_interactive = sender_id.is_some();
+        if is_interactive {
+            manifest.metadata.insert(
+                "request_priority".to_string(),
+                serde_json::Value::String("interactive".to_string()),
+            );
+        }
+
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
             let workspace_dir = self.config.effective_workspaces_dir().join(&manifest.name);
@@ -1960,6 +1985,10 @@ impl OpenFangKernel {
         let kernel_clone = Arc::clone(self);
 
         let handle = tokio::spawn(async move {
+            // Acquire interactive semaphore for channel messages (streaming path)
+            // (Removed: moved to PriorityLlmDriver)
+            let _interactive_permit = None::<()>;
+
             // Auto-compact if the session is large before running the loop
             if needs_compact {
                 info!(agent_id = %agent_id, messages = session.messages.len(), "Auto-compacting session");
@@ -2435,6 +2464,17 @@ impl OpenFangKernel {
         // Apply model routing if configured (disabled in Stable mode)
         let mut manifest = entry.manifest.clone();
 
+        // Tag channel-originated messages as Interactive priority.
+        // Channel messages always have a sender_id (the chat user's platform ID).
+        // Background/autonomous self-prompts do not set sender_id.
+        let is_interactive = sender_id.is_some();
+        if is_interactive {
+            manifest.metadata.insert(
+                "request_priority".to_string(),
+                serde_json::Value::String("interactive".to_string()),
+            );
+        }
+
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
             let workspace_dir = self.config.effective_workspaces_dir().join(&manifest.name);
@@ -2585,6 +2625,7 @@ impl OpenFangKernel {
                 temperature: manifest.model.temperature,
                 system: Some(manifest.model.system_prompt.clone()),
                 thinking: None,
+                priority: openfang_runtime::llm_driver::RequestPriority::default(),
             };
             let raw_score = router.raw_score(&probe);
             let (complexity, routed_model) = router.select_model(&probe);
@@ -2644,6 +2685,11 @@ impl OpenFangKernel {
         } else {
             message.to_string()
         };
+
+        // Acquire interactive semaphore for channel messages to ensure they don't
+        // compete with background agents for LLM slots.
+        // (Removed: moved to PriorityLlmDriver)
+        let _interactive_permit = None::<()>;
 
         let result = run_agent_loop(
             &manifest,
@@ -3439,11 +3485,20 @@ impl OpenFangKernel {
                 heartbeat_interval_secs: 300,
                 ..Default::default()
             }),
-            // Autonomous hands must run in Continuous mode so the background loop picks them up.
+            // Autonomous hands must run in Periodic mode so the background loop picks them up.
             // Reactive (default) only fires on incoming messages, so autonomous hands would be inert.
             schedule: if def.agent.max_iterations.is_some() {
-                ScheduleMode::Continuous {
-                    check_interval_secs: 60,
+                let name = def.agent.name.as_str();
+                let cron = match name {
+                    "trader-hand" => "trader_market_hours",
+                    "predictor-hand" => "every 30m",
+                    "collector-hand" => "every 60m",
+                    "browser-hand" => "every 60m",
+                    "researcher-hand" => "every 60m",
+                    _ => "every 60m",
+                };
+                ScheduleMode::Periodic {
+                    cron: cron.to_string(),
                 }
             } else {
                 ScheduleMode::default()
@@ -4905,13 +4960,22 @@ impl OpenFangKernel {
                 }
             }
             if chain.len() > 1 {
-                return Ok(Arc::new(
+                let fallback = Arc::new(
                     openfang_runtime::drivers::fallback::FallbackDriver::with_models(chain),
-                ));
+                );
+                return Ok(Arc::new(openfang_runtime::drivers::priority::PriorityLlmDriver::new(
+                    fallback,
+                    Arc::clone(&self.interactive_llm_semaphore),
+                    Arc::clone(&self.background_llm_semaphore),
+                )));
             }
         }
 
-        Ok(primary)
+        Ok(Arc::new(openfang_runtime::drivers::priority::PriorityLlmDriver::new(
+            primary,
+            Arc::clone(&self.interactive_llm_semaphore),
+            Arc::clone(&self.background_llm_semaphore),
+        )))
     }
 
     /// Initialize tool selector with embedding-based smart filtering.

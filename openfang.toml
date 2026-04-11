@@ -3,10 +3,10 @@
 
 [default_model]
 provider = "ollama"
-model = "qwen2.5-coder:32b-instruct-q4_K_M"
+model = "qwen3.5:9b"
 base_url = "http://localhost:11434"
 
-# Fallback chain: primary (local qwen2.5-coder) → fallback (local qwen3.5) → cloud (Groq llama-3.3-70b)
+# Fallback chain: primary (local qwen3.5) → fallback (local qwen3.5) → cloud (Groq llama-3.3-70b)
 [[model_fallback]]
 provider = "ollama"
 model = "qwen3.5:9b"

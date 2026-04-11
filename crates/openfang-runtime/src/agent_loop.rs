@@ -8,7 +8,7 @@ use crate::context_budget::{apply_context_guard, truncate_tool_result_dynamic, C
 use crate::context_overflow::{recover_from_overflow, RecoveryStage};
 use crate::embedding::EmbeddingDriver;
 use crate::kernel_handle::KernelHandle;
-use crate::llm_driver::{CompletionRequest, LlmDriver, LlmError, StreamEvent};
+use crate::llm_driver::{CompletionRequest, LlmDriver, LlmError, RequestPriority, StreamEvent};
 use crate::llm_errors;
 use crate::loop_guard::{LoopGuard, LoopGuardConfig, LoopGuardVerdict};
 use crate::mcp::McpConnection;
@@ -466,6 +466,17 @@ pub async fn run_agent_loop(
         messages = crate::session_repair::validate_and_repair(&messages);
     }
 
+    // Determine request priority from manifest metadata (set by kernel for channel messages)
+    let request_priority = manifest
+        .metadata
+        .get("request_priority")
+        .and_then(|v| v.as_str())
+        .map(|s| match s {
+            "interactive" => RequestPriority::Interactive,
+            _ => RequestPriority::Background,
+        })
+        .unwrap_or_default();
+
     // Use autonomous config max_iterations if set, else default
     let max_iterations = manifest
         .autonomous
@@ -530,6 +541,7 @@ pub async fn run_agent_loop(
             temperature: manifest.model.temperature,
             system: Some(system_prompt.clone()),
             thinking: None,
+            priority: request_priority,
         };
 
         // Notify phase: Thinking
@@ -1479,6 +1491,17 @@ pub async fn run_agent_loop_streaming(
         messages = crate::session_repair::validate_and_repair(&messages);
     }
 
+    // Determine request priority from manifest metadata (set by kernel for channel messages)
+    let request_priority = manifest
+        .metadata
+        .get("request_priority")
+        .and_then(|v| v.as_str())
+        .map(|s| match s {
+            "interactive" => RequestPriority::Interactive,
+            _ => RequestPriority::Background,
+        })
+        .unwrap_or_default();
+
     // Use autonomous config max_iterations if set, else default
     let max_iterations = manifest
         .autonomous
@@ -1553,6 +1576,7 @@ pub async fn run_agent_loop_streaming(
             temperature: manifest.model.temperature,
             system: Some(system_prompt.clone()),
             thinking: None,
+            priority: request_priority,
         };
 
         // Notify phase: on first iteration emit Streaming; on subsequent

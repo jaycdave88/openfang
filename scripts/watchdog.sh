@@ -45,24 +45,62 @@ restart_openfang() {
     log "OpenFang restarted"
 }
 
+# Validate required models are available
+validate_models() {
+    local REQUIRED_MODELS=("qwen3.5:35b-a3b-coding-nvfp4" "qwen3.5:9b" "nomic-embed-text")
+    local MISSING=0
+    for MODEL in "${REQUIRED_MODELS[@]}"; do
+        if ! /opt/homebrew/bin/ollama list 2>/dev/null | grep -q "$MODEL"; then
+            echo "$(date): CRITICAL — Required model $MODEL not found" >> $LOG
+            /opt/homebrew/bin/ollama pull "$MODEL" 2>&1
+            MISSING=1
+        fi
+    done
+    [ $MISSING -eq 1 ] && sleep 10
+}
+
 # 1. Ollama
 if ! pgrep -f "ollama serve" > /dev/null 2>&1; then
     echo "$TS: STARTING Ollama (was down)" >> $LOG
-    OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_QUEUE=50 OLLAMA_FLASH_ATTENTION=1 OLLAMA_MAX_LOADED_MODELS=3 OLLAMA_KEEP_ALIVE=-1 /opt/homebrew/bin/ollama serve > /tmp/ollama-serve.log 2>&1 &
+    OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_QUEUE=50 OLLAMA_FLASH_ATTENTION=1 OLLAMA_MAX_LOADED_MODELS=3 OLLAMA_KEEP_ALIVE=5m /opt/homebrew/bin/ollama serve > /tmp/ollama-serve.log 2>&1 &
     sleep 15
+    validate_models
     # Load models
-    curl -s -X POST http://localhost:11434/api/generate -d '{"model":"qwen3:30b-a3b","prompt":"","keep_alive":-1}' > /dev/null 2>&1
-    curl -s -X POST http://localhost:11434/api/generate -d '{"model":"nomic-embed-text","prompt":"","keep_alive":-1}' > /dev/null 2>&1
+    curl -s -X POST http://localhost:11434/api/generate -d '{"model":"llama3.3:70b","prompt":"","keep_alive":"5m"}' > /dev/null 2>&1
+    curl -s -X POST http://localhost:11434/api/generate -d '{"model":"nomic-embed-text","prompt":"","keep_alive":"5m"}' > /dev/null 2>&1
     echo "$TS: Ollama started + models loaded" >> $LOG
 elif ! curl -s -m 5 http://localhost:11434/api/tags > /dev/null 2>&1; then
     echo "$TS: RESTARTING Ollama (running but not responding)" >> $LOG
     pkill -9 -f "ollama serve"
     sleep 5
-    OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_QUEUE=50 OLLAMA_FLASH_ATTENTION=1 OLLAMA_MAX_LOADED_MODELS=3 OLLAMA_KEEP_ALIVE=-1 /opt/homebrew/bin/ollama serve > /tmp/ollama-serve.log 2>&1 &
+    OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_QUEUE=50 OLLAMA_FLASH_ATTENTION=1 OLLAMA_MAX_LOADED_MODELS=3 OLLAMA_KEEP_ALIVE=5m /opt/homebrew/bin/ollama serve > /tmp/ollama-serve.log 2>&1 &
     sleep 15
-    curl -s -X POST http://localhost:11434/api/generate -d '{"model":"qwen3:30b-a3b","prompt":"","keep_alive":-1}' > /dev/null 2>&1
-    curl -s -X POST http://localhost:11434/api/generate -d '{"model":"nomic-embed-text","prompt":"","keep_alive":-1}' > /dev/null 2>&1
+    validate_models
+    curl -s -X POST http://localhost:11434/api/generate -d '{"model":"llama3.3:70b","prompt":"","keep_alive":"5m"}' > /dev/null 2>&1
+    curl -s -X POST http://localhost:11434/api/generate -d '{"model":"nomic-embed-text","prompt":"","keep_alive":"5m"}' > /dev/null 2>&1
     echo "$TS: Ollama hard-restarted + models loaded" >> $LOG
+else
+    # Ollama is running — still validate models exist
+    validate_models
+fi
+
+# 1b. LiteLLM Proxy (port 4000) — middleware between OpenFang and Ollama
+if ! curl -s -m 5 http://localhost:4000/health > /dev/null 2>&1; then
+    echo "$TS: RESTARTING LiteLLM proxy (not responding on port 4000)" >> $LOG
+    # Kill any existing litellm process
+    pkill -f 'litellm.*--port 4000' 2>/dev/null
+    sleep 2
+    mkdir -p /Users/momo/.litellm/logs
+    nohup /Users/momo/Library/Python/3.9/bin/litellm \
+        --config /Users/momo/.litellm/config.yaml \
+        --port 4000 --host 0.0.0.0 \
+        > /Users/momo/.litellm/logs/litellm.log 2>&1 &
+    sleep 10
+    if curl -s -m 5 http://localhost:4000/health > /dev/null 2>&1; then
+        echo "$TS: LiteLLM proxy restarted successfully" >> $LOG
+    else
+        echo "$TS: WARNING: LiteLLM proxy failed to start" >> $LOG
+    fi
 fi
 
 # 2. OpenFang - Smart Health Checks

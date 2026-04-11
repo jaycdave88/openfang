@@ -14,17 +14,12 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-/// Maximum number of concurrent background LLM calls across all agents.
-const MAX_CONCURRENT_BG_LLM: usize = 5;
-
 /// Manages background task loops for autonomous agents.
 pub struct BackgroundExecutor {
     /// Running background task handles, keyed by agent ID.
     tasks: DashMap<AgentId, JoinHandle<()>>,
     /// Shutdown signal receiver (from Supervisor).
     shutdown_rx: watch::Receiver<bool>,
-    /// SECURITY: Global semaphore to limit concurrent background LLM calls.
-    llm_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl BackgroundExecutor {
@@ -33,7 +28,6 @@ impl BackgroundExecutor {
         Self {
             tasks: DashMap::new(),
             shutdown_rx,
-            llm_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BG_LLM)),
         }
     }
 
@@ -63,7 +57,6 @@ impl BackgroundExecutor {
                 let name = agent_name.to_string();
                 let mut shutdown = self.shutdown_rx.clone();
                 let busy = Arc::new(AtomicBool::new(false));
-                let semaphore = self.llm_semaphore.clone();
 
                 info!(
                     agent = %name, id = %agent_id,
@@ -90,15 +83,6 @@ impl BackgroundExecutor {
                             continue;
                         }
 
-                        // SECURITY: Acquire global LLM concurrency permit
-                        let permit = match semaphore.clone().acquire_owned().await {
-                            Ok(p) => p,
-                            Err(_) => {
-                                busy.store(false, Ordering::SeqCst);
-                                break; // Semaphore closed
-                            }
-                        };
-
                         let prompt = format!(
                             "[AUTONOMOUS TICK] You are running in continuous mode. \
                              Check your goals, review shared memory for pending tasks, \
@@ -107,10 +91,9 @@ impl BackgroundExecutor {
                         debug!(agent = %name, "Continuous loop: sending self-prompt");
                         let busy_clone = busy.clone();
                         let jh = (send_message)(agent_id, prompt);
-                        // Spawn a watcher that clears the busy flag and drops permit when done
+                        // Spawn a watcher that clears the busy flag when done
                         tokio::spawn(async move {
                             let _ = jh.await;
-                            drop(permit);
                             busy_clone.store(false, Ordering::SeqCst);
                         });
                     }
@@ -119,22 +102,20 @@ impl BackgroundExecutor {
                 self.tasks.insert(agent_id, handle);
             }
             ScheduleMode::Periodic { cron } => {
-                let interval_secs = parse_cron_to_secs(cron);
-                let interval = std::time::Duration::from_secs(interval_secs);
                 let name = agent_name.to_string();
                 let cron_owned = cron.clone();
                 let mut shutdown = self.shutdown_rx.clone();
                 let busy = Arc::new(AtomicBool::new(false));
-                let semaphore = self.llm_semaphore.clone();
 
                 info!(
                     agent = %name, id = %agent_id,
-                    cron = %cron, interval_secs = interval_secs,
+                    cron = %cron,
                     "Starting periodic background loop"
                 );
 
                 let handle = tokio::spawn(async move {
                     loop {
+                        let interval = std::time::Duration::from_secs(parse_cron_to_secs(&cron_owned));
                         tokio::select! {
                             _ = tokio::time::sleep(interval) => {}
                             _ = shutdown.changed() => {
@@ -151,15 +132,6 @@ impl BackgroundExecutor {
                             continue;
                         }
 
-                        // SECURITY: Acquire global LLM concurrency permit
-                        let permit = match semaphore.clone().acquire_owned().await {
-                            Ok(p) => p,
-                            Err(_) => {
-                                busy.store(false, Ordering::SeqCst);
-                                break; // Semaphore closed
-                            }
-                        };
-
                         let prompt = format!(
                             "[SCHEDULED TICK] You are running on a periodic schedule ({cron_owned}). \
                              Perform your routine duties. Agent: {name}"
@@ -169,7 +141,6 @@ impl BackgroundExecutor {
                         let jh = (send_message)(agent_id, prompt);
                         tokio::spawn(async move {
                             let _ = jh.await;
-                            drop(permit);
                             busy_clone.store(false, Ordering::SeqCst);
                         });
                     }
@@ -253,6 +224,19 @@ pub fn parse_condition(condition: &str) -> Option<TriggerPattern> {
 /// Falls back to 300 seconds (5 minutes) for unparseable expressions.
 pub fn parse_cron_to_secs(cron: &str) -> u64 {
     let cron = cron.trim().to_lowercase();
+
+    if cron == "trader_market_hours" {
+        use chrono::Timelike;
+        let now = chrono::Utc::now();
+        let hour = now.hour();
+        // Approximate market hours (13:30 to 20:00 UTC summer, 14:30 to 21:00 UTC winter)
+        // We'll just use 13:00 to 21:00 UTC to be safe.
+        if (13..21).contains(&hour) {
+            return 15 * 60; // 15 mins
+        } else {
+            return 60 * 60; // 60 mins
+        }
+    }
 
     // Try "every <N><unit>" format
     if let Some(rest) = cron.strip_prefix("every ") {

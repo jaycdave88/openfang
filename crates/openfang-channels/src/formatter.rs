@@ -699,4 +699,134 @@ mod tests {
             "Heading\n\nBold text and italic text\n\ndef hello():\nprint('world')\n\nLink (https://example.com)"
         );
     }
+
+    #[test]
+    fn test_imessage_plain_blockquotes() {
+        let result = markdown_to_imessage_plain("> This is a quote\n> second line");
+        assert_eq!(result, "This is a quote\nsecond line");
+    }
+
+    #[test]
+    fn test_imessage_plain_nested_blockquotes() {
+        let result = markdown_to_imessage_plain(">> deeply nested quote");
+        assert_eq!(result, "deeply nested quote");
+    }
+
+    #[test]
+    fn test_imessage_plain_bold_only() {
+        let result = markdown_to_imessage_plain("**important**");
+        assert_eq!(result, "important");
+    }
+
+    #[test]
+    fn test_imessage_plain_italic_only() {
+        let result = markdown_to_imessage_plain("*emphasis*");
+        assert_eq!(result, "emphasis");
+    }
+
+    #[test]
+    fn test_imessage_plain_bold_and_italic() {
+        let result = markdown_to_imessage_plain("**bold** and *italic* mixed");
+        assert_eq!(result, "bold and italic mixed");
+    }
+
+    #[test]
+    fn test_imessage_plain_inline_code() {
+        let result = markdown_to_imessage_plain("Use `cargo test` to run tests");
+        assert_eq!(result, "Use cargo test to run tests");
+    }
+
+    #[test]
+    fn test_imessage_plain_fenced_code_block() {
+        let result = markdown_to_imessage_plain("```\nlet x = 1;\nlet y = 2;\n```");
+        assert_eq!(result, "let x = 1;\nlet y = 2;");
+    }
+
+    #[test]
+    fn test_imessage_plain_links() {
+        let result = markdown_to_imessage_plain("[Rust docs](https://doc.rust-lang.org)");
+        assert_eq!(result, "Rust docs (https://doc.rust-lang.org)");
+    }
+
+    #[test]
+    fn test_imessage_plain_heading_levels() {
+        assert_eq!(markdown_to_imessage_plain("# H1"), "H1");
+        assert_eq!(markdown_to_imessage_plain("## H2"), "H2");
+        assert_eq!(markdown_to_imessage_plain("### H3"), "H3");
+    }
+
+    #[test]
+    fn test_imessage_plain_unordered_list() {
+        let result = markdown_to_imessage_plain("- item one\n- item two\n- item three");
+        assert_eq!(result, "- item one\n- item two\n- item three");
+    }
+
+    #[test]
+    fn test_imessage_plain_task_list() {
+        let result = markdown_to_imessage_plain("- [x] done\n- [ ] todo");
+        assert_eq!(result, "done\ntodo");
+    }
+
+    #[test]
+    fn test_imessage_plain_strikethrough() {
+        let result = markdown_to_imessage_plain("~~deleted~~ kept");
+        assert_eq!(result, "deleted kept");
+    }
+
+    #[test]
+    fn test_imessage_plain_empty_input() {
+        let result = markdown_to_imessage_plain("");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_imessage_plain_no_markdown() {
+        let result = markdown_to_imessage_plain("Just a plain message with no formatting.");
+        assert_eq!(result, "Just a plain message with no formatting.");
+    }
+
+    #[test]
+    fn test_imessage_plain_mixed_content() {
+        let result = markdown_to_imessage_plain(
+            "# Status Update\n\
+             \n\
+             > Important note\n\
+             \n\
+             **Action items:**\n\
+             - [x] Review PR\n\
+             - [ ] Deploy to staging\n\
+             \n\
+             See [the docs](https://docs.example.com) for details.\n",
+        );
+        assert_eq!(
+            result,
+            "Status Update\n\nImportant note\n\nAction items:\nReview PR\nDeploy to staging\n\nSee the docs (https://docs.example.com) for details."
+        );
+    }
+
+    #[test]
+    fn test_imessage_plain_backslash_content() {
+        // Backslashes should pass through (escaping is done at AppleScript level, not here)
+        let result = markdown_to_imessage_plain("path\\to\\file");
+        assert_eq!(result, "path\\to\\file");
+    }
+
+    #[test]
+    fn test_imessage_plain_quotes_in_text() {
+        // Double quotes should pass through (escaping is done at AppleScript level)
+        let result = markdown_to_imessage_plain("He said \"hello\"");
+        assert_eq!(result, "He said \"hello\"");
+    }
+
+    #[test]
+    fn test_imessage_plain_image_link() {
+        let result = markdown_to_imessage_plain("![alt text](https://img.example.com/pic.png)");
+        assert_eq!(result, "alt text (https://img.example.com/pic.png)");
+    }
+
+    #[test]
+    fn test_imessage_plain_autolinks() {
+        let result = markdown_to_imessage_plain("<https://example.com>");
+        assert_eq!(result, "https://example.com");
+    }
 }

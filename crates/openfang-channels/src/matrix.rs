@@ -85,6 +85,24 @@ impl MatrixAdapter {
         self
     }
 
+    /// Check whether a Matrix user ID is an iMessage ghost user (created by
+    /// mautrix-imessage) and extract the phone number if so.
+    /// Ghost users look like `@imessage_16304006795:momo.local`.
+    /// Returns `Some("+16304006795")` for valid ghost users, `None` otherwise.
+    fn extract_imessage_phone(member_id: &str) -> Option<String> {
+        if !member_id.starts_with("@imessage_") {
+            return None;
+        }
+        match member_id
+            .trim_start_matches("@imessage_")
+            .split(':')
+            .next()
+        {
+            Some(p) if !p.is_empty() => Some(format!("+{p}")),
+            _ => None,
+        }
+    }
+
     /// Look up room members for an `@imessage_<phone>:…` ghost user and, if
     /// found, send the message directly via macOS Messages.app (AppleScript).
     /// This bypasses the Matrix→bridge path which doesn't work because Conduit
@@ -120,39 +138,52 @@ impl MatrixAdapter {
         };
 
         for member_id in joined.keys() {
-            // Ghost users created by mautrix-imessage look like
-            // @imessage_16304006795:momo.local
-            if !member_id.starts_with("@imessage_") {
-                continue;
-            }
-            let phone = match member_id
-                .trim_start_matches("@imessage_")
-                .split(':')
-                .next()
-            {
-                Some(p) if !p.is_empty() => format!("+{p}"),
-                _ => continue,
+            let phone = match Self::extract_imessage_phone(member_id) {
+                Some(p) => p,
+                None => continue,
             };
 
             let plain = crate::formatter::markdown_to_imessage_plain(text);
-            let escaped = plain.replace('\\', "\\\\").replace('"', "\\\"");
+            // Escape backslashes and double-quotes for AppleScript string literals,
+            // then replace newlines with `" & return & "` so AppleScript builds
+            // a multi-line string via concatenation (raw newlines inside "…" are
+            // a syntax error).
+            let escaped = plain
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\" & return & \"");
             let script = format!(
-                "tell application \"Messages\" to send \"{escaped}\" to buddy \"{phone}\" of (1st account whose service type = iMessage)"
+                "set msg to \"{escaped}\"\n\
+                 tell application \"Messages\" to send msg to buddy \"{phone}\" of (1st account whose service type = iMessage)"
             );
+            // Pipe the script via stdin so multi-line AppleScript works
+            // (osascript -e treats each -e as one line).
             match tokio::process::Command::new("osascript")
-                .arg("-e")
-                .arg(&script)
-                .output()
-                .await
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
             {
-                Ok(o) if o.status.success() => {
-                    info!("Sent iMessage directly to {phone}");
-                }
-                Ok(o) => {
-                    warn!(
-                        "AppleScript iMessage failed: {}",
-                        String::from_utf8_lossy(&o.stderr)
-                    );
+                Ok(mut child) => {
+                    use tokio::io::AsyncWriteExt;
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = stdin.write_all(script.as_bytes()).await;
+                        drop(stdin); // close stdin so osascript runs
+                    }
+                    match child.wait_with_output().await {
+                        Ok(o) if o.status.success() => {
+                            info!("Sent iMessage directly to {phone}");
+                        }
+                        Ok(o) => {
+                            warn!(
+                                "AppleScript iMessage failed: {}",
+                                String::from_utf8_lossy(&o.stderr)
+                            );
+                        }
+                        Err(e) => {
+                            warn!("Failed to wait on osascript: {e}");
+                        }
+                    }
                 }
                 Err(e) => {
                     warn!("Failed to exec osascript: {e}");
@@ -688,5 +719,75 @@ mod tests {
         let (token, qs) = adapter.send_auth();
         assert_eq!(token, "as_token_123");
         assert_eq!(qs, "?user_id=@bridge:matrix.org");
+    }
+
+    #[test]
+    fn test_extract_imessage_phone_valid() {
+        let result = MatrixAdapter::extract_imessage_phone("@imessage_16304006795:momo.local");
+        assert_eq!(result, Some("+16304006795".to_string()));
+    }
+
+    #[test]
+    fn test_extract_imessage_phone_different_server() {
+        let result = MatrixAdapter::extract_imessage_phone("@imessage_14155551234:matrix.org");
+        assert_eq!(result, Some("+14155551234".to_string()));
+    }
+
+    #[test]
+    fn test_extract_imessage_phone_not_imessage_user() {
+        assert_eq!(MatrixAdapter::extract_imessage_phone("@user:matrix.org"), None);
+        assert_eq!(MatrixAdapter::extract_imessage_phone("@bot:matrix.org"), None);
+    }
+
+    #[test]
+    fn test_extract_imessage_phone_similar_prefix() {
+        // Must start with exactly @imessage_
+        assert_eq!(MatrixAdapter::extract_imessage_phone("@imessages_123:host"), None);
+        assert_eq!(MatrixAdapter::extract_imessage_phone("@imessag_123:host"), None);
+    }
+
+    #[test]
+    fn test_extract_imessage_phone_empty_phone() {
+        // @imessage_ with no phone before the colon
+        assert_eq!(MatrixAdapter::extract_imessage_phone("@imessage_:momo.local"), None);
+    }
+
+    #[test]
+    fn test_extract_imessage_phone_no_server_part() {
+        // No colon/server — the phone part is the entire suffix
+        let result = MatrixAdapter::extract_imessage_phone("@imessage_16304006795");
+        assert_eq!(result, Some("+16304006795".to_string()));
+    }
+
+    #[test]
+    fn test_extract_imessage_phone_international() {
+        let result = MatrixAdapter::extract_imessage_phone("@imessage_447911123456:bridge.local");
+        assert_eq!(result, Some("+447911123456".to_string()));
+    }
+
+    #[test]
+    fn test_imessage_applescript_escaping() {
+        // Verify the escaping applied to text before embedding in AppleScript
+        let plain = crate::formatter::markdown_to_imessage_plain("He said \"hello\" and used a \\ backslash");
+        let escaped = plain
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\" & return & \"");
+        assert!(!escaped.contains(r#"""#) || escaped.contains(r#"\""#));
+        assert!(escaped.contains(r"\\"));
+    }
+
+    #[test]
+    fn test_imessage_applescript_newline_escaping() {
+        // Multi-line markdown must not produce raw newlines in AppleScript strings
+        let plain = crate::formatter::markdown_to_imessage_plain("## Hello\n\nWorld\n");
+        let escaped = plain
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\" & return & \"");
+        // The escaped string must not contain any literal newlines
+        assert!(!escaped.contains('\n'));
+        // It should use AppleScript return concatenation
+        assert!(escaped.contains("\" & return & \""));
     }
 }

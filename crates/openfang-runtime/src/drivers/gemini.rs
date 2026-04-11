@@ -987,6 +987,7 @@ mod tests {
             temperature: 0.7,
             system: None,
             thinking: None,
+            priority: Default::default(),
         };
 
         let tools = convert_tools(&request);
@@ -1005,6 +1006,7 @@ mod tests {
             temperature: 0.7,
             system: None,
             thinking: None,
+            priority: Default::default(),
         };
 
         let tools = convert_tools(&request);

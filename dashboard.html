@@ -1,0 +1,63 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>AI Trading Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-gray-100 p-8 font-sans"><div class="max-w-7xl mx-auto space-y-8"><h1 class="text-4xl font-bold text-gray-900">AI Trading Dashboard</h1>
+<div class="grid grid-cols-1 md:grid-cols-2 gap-8"><div class="bg-white rounded-lg shadow p-6"><h2 class="text-2xl font-bold mb-4">Portfolio</h2>
+<div id="portfolio-stats" class="text-gray-700 mb-4"></div><div class="overflow-x-auto"><table class="min-w-full text-left">
+<thead><tr class="border-b"><th class="py-2">Asset</th><th class="py-2">Quantity</th><th class="py-2">Avg Cost</th><th class="py-2">Value</th></tr></thead>
+<tbody id="positions-body"></tbody></table></div></div>
+<div class="bg-white rounded-lg shadow p-6"><h2 class="text-2xl font-bold mb-4">Prediction Accuracy</h2>
+<div id="accuracy-stats" class="space-y-4"><p class="text-gray-500">Loading accuracy metrics...</p></div></div></div>
+<div class="grid grid-cols-1 md:grid-cols-2 gap-8"><div class="bg-white rounded-lg shadow p-6"><h2 class="text-2xl font-bold mb-4">Recent Trades</h2>
+<div class="overflow-x-auto h-64 overflow-y-auto"><table class="min-w-full text-left text-sm">
+<thead><tr class="border-b"><th class="py-2">Time</th><th class="py-2">Asset</th><th class="py-2">Side</th><th class="py-2">Price</th><th class="py-2">Reason</th></tr></thead>
+<tbody id="trades-body"></tbody></table></div></div>
+<div class="bg-white rounded-lg shadow p-6"><h2 class="text-2xl font-bold mb-4">AI Learnings & Insights</h2>
+<div id="learnings-list" class="space-y-4 h-64 overflow-y-auto text-sm"><p class="text-gray-500">Loading insights...</p></div></div></div>
+<div class="bg-white rounded-lg shadow p-6"><h2 class="text-2xl font-bold mb-4">Active Predictions</h2>
+<div class="overflow-x-auto h-96 overflow-y-auto"><table class="min-w-full text-left text-sm">
+<thead><tr class="border-b"><th class="py-2">Date</th><th class="py-2">Ticker</th><th class="py-2">Dir</th><th class="py-2">Target</th><th class="py-2">Conf</th><th class="py-2">Strategy</th><th class="py-2">Reasoning</th></tr></thead>
+<tbody id="predictions-body"></tbody></table></div></div></div>
+<script>
+async function fetchDashboard() {
+    try {
+        const res = await fetch('http://127.0.0.1:4200/api/trading/dashboard');
+        renderDashboard(await res.json());
+    } catch (e) {
+        document.getElementById('portfolio-stats').innerHTML = '<p class="text-red-500">Error loading data. OpenFang might be down.</p>';
+    }
+}
+function renderDashboard(data) {
+    const port = data.portfolio;
+    if (port) {
+        document.getElementById('portfolio-stats').innerHTML = `<p class="text-lg">Value: <span class="font-bold">$${port.total_value.toLocaleString()}</span> | Cash: $${port.balance.toLocaleString()}</p>`;
+        document.getElementById('positions-body').innerHTML = port.positions.map(p => `<tr class="border-b"><td class="py-2 font-semibold">${p.ticker}</td><td class="py-2">${p.quantity}</td><td class="py-2">$${p.avg_cost.toLocaleString()}</td><td class="py-2">$${p.current_value.toLocaleString()}</td></tr>`).join('');
+    }
+    let accHTML = '';
+    if (data.accuracy_7d) accHTML += `<div class="p-4 bg-blue-50 rounded"><h3 class="font-bold">7-Day Accuracy</h3><p>${data.accuracy_7d.accuracy_pct.toFixed(1)}%</p></div>`;
+    if (data.accuracy_30d) accHTML += `<div class="p-4 bg-green-50 rounded"><h3 class="font-bold">30-Day Accuracy</h3><p>${data.accuracy_30d.accuracy_pct.toFixed(1)}%</p></div>`;
+    document.getElementById('accuracy-stats').innerHTML = accHTML || '<p class="text-gray-500">No evaluated predictions yet.</p>';
+    
+    const learnList = document.getElementById('learnings-list');
+    if (data.learnings?.length > 0) {
+        learnList.innerHTML = data.learnings.map(l => `<div class="border-l-4 border-gray-300 pl-4 py-2"><p class="font-bold capitalize text-blue-600">${l.category}</p><p class="text-gray-700">${l.insight}</p><p class="text-xs text-gray-400 mt-1">${new Date(l.created_at).toLocaleString()}</p></div>`).join('');
+    } else {
+        learnList.innerHTML = '<p class="text-gray-500">No insights generated yet.</p>';
+    }
+    
+    const tradesBody = document.getElementById('trades-body');
+    if (data.recent_trades?.length > 0) {
+        tradesBody.innerHTML = data.recent_trades.map(t => `<tr class="border-b"><td class="py-2">${new Date(t.timestamp).toLocaleString()}</td><td class="py-2 font-bold">${t.ticker}</td><td class="py-2 font-bold uppercase ${t.side==='buy'?'text-green-600':'text-red-600'}">${t.side}</td><td class="py-2">$${t.price.toLocaleString()}</td><td class="py-2 italic text-gray-500">${t.reason || '-'}</td></tr>`).join('');
+    } else {
+        tradesBody.innerHTML = '<tr><td colspan="5" class="py-4 text-center text-gray-500">No trades recorded</td></tr>';
+    }
+    
+    const predBody = document.getElementById('predictions-body');
+    if (data.predictions?.length > 0) {
+        predBody.innerHTML = data.predictions.map(p => `<tr class="border-b"><td class="py-2 whitespace-nowrap">${new Date(p.created_at).toLocaleDateString()}</td><td class="py-2 font-bold">${p.ticker}</td><td class="py-2 uppercase font-bold ${p.direction==='up'?'text-green-600':'text-red-600'}">${p.direction}</td><td class="py-2">$${p.target_price.toLocaleString()}</td><td class="py-2">${p.confidence}%</td><td class="py-2 capitalize">${p.strategy || 'unknown'}</td><td class="py-2"><div class="line-clamp-2" title="${p.reasoning}">${p.reasoning}</div></td></tr>`).join('');
+    } else {
+        predBody.innerHTML = '<tr><td colspan="7" class="py-4 text-center text-gray-500">No open predictions</td></tr>';
+    }
+}
+fetchDashboard(); setInterval(fetchDashboard, 30000);
+</script></body></html>
